@@ -16,12 +16,14 @@
 //! Orchestrator agent
 pub mod engine;
 pub(crate) mod instance_manager;
+pub(crate) mod instance_manager_factory;
 pub(crate) mod orch_binder;
 pub mod states;
 use crate::engine::OrchestratorEngine;
 use crate::orch_binder::bundle_state_reporter_service::ServiceBundleStateReporterService;
 use crate::states::orch_states_updates_handler::OrchestratorStateUpdatesHandler;
 use crate::states::states_subscriber_interface::StatesClientSubscriber;
+use crate::instance_manager_factory::InstanceManagerFactory;
 use crate::states::ORCH_POWER_READY_PROP;
 use crate::states::ORCH_VEHICLE_READY_PROP;
 use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ILifecycleManager::{
@@ -98,15 +100,18 @@ impl Agent {
         let mut evaluator = Evaluator::new(config, &bundle_config_files);
         evaluator.restore_modes();
         let modes = evaluator.get_custom_modes();
+        let restart_config = Arc::new(evaluator.get_retry_configuration());
         let lm_fetcher = Box::new(LMBinder::default());
         let lm_connection = PersistentBinderConnection::new(move || lm_fetcher.get_lm());
         let crash_notifier: Arc<
             dyn BinderConnectionManager<dyn IServiceBundleCrashNotificationService>,
         > = PersistentBinderConnection::new(Self::get_crash_notification_binder);
+        let instance_manager_factory =
+            Arc::new(InstanceManagerFactory::new(lm_connection.clone(), restart_config));
         let orch = Arc::new(OrchestratorEngine::new(
             evaluator,
             process_dump_info.clone(),
-            lm_connection.clone(),
+            instance_manager_factory,
             crash_notifier.clone(),
         ));
         dm.add_reporter("Configuration state", &orch.clone());
