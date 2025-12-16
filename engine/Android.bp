@@ -1,0 +1,84 @@
+// Copyright (C) 2026 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+rust_library {
+    name: "libsdv_orch",
+    defaults: ["orchestration@rust_defaults"],
+    srcs: [
+        "src/agent.rs",
+    ],
+}
+
+rust_binary {
+    name: "sdv_orchestration_agent",
+    defaults: ["orchestration@rust_defaults"],
+    srcs: [
+        "src/main.rs",
+    ],
+    ld_flags: ["-Wl,--no-as-needed"],
+    rustlibs: [
+        "libsdv_orch",
+    ],
+    apex_available: [
+        "//apex_available:platform",
+    ],
+    system_ext_specific: true,
+    prefer_rlib: true,
+}
+
+rust_test {
+    name: "sdv_core_core_services_unit_orch_tests",
+    defaults: ["orchestration@rust_defaults"],
+    srcs: [
+        "src/agent.rs",
+    ],
+    rustlibs: [
+        "libgoogletest_rust",
+        // Orchestrator uses ServiceFqin in tests to mock LM
+        "google.sdv.identity-V2-rust",
+        "libnamed_lock",
+        "libsdv_orch_test_mocks",
+    ],
+    ld_flags: ["-Wl,--no-as-needed"],
+    test_options: {
+        unit_test: true,
+    },
+    require_root: true,
+    data: [
+        "src/test_protos/unit_test_config_sample.textproto",
+        "src/test_protos/unit_test_config_no_condition.textproto",
+    ],
+    test_suites: [
+        "automotive-sdv-tests",
+        "general-tests",
+    ],
+    target: {
+        host: {
+            data_libs: [
+                "libcutils",
+                "libbase",
+                "libc++",
+                "libutils",
+                "liblog",
+                "libbinder_ndk",
+                "libbinder",
+            ],
+        },
+    },
+    test_config_template: ":sdv_authz_enforcement_flag_enabled_config_template",
+}

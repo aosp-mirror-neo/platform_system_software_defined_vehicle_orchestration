@@ -1,0 +1,45 @@
+# Copyright (C) 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# proto-file: system/software_defined_vehicle/orchestration/src/distributed_config/protos/service_bundle_config.proto
+# proto-message: ServiceBundleConfig
+
+package_name: "sdv.test.group"
+service_bundle_name: "GroupConfigOnly"
+
+instance: "left"
+instance: "right"
+
+group_mapping {
+    group: "left_instances"
+    instance: "left"
+    # duplicated instance should not appear in config evaluation output
+    instance: "left"
+}
+
+group_mapping {
+    group: "right_instances"
+    instance: "right"
+}
+
+group_mapping {
+    group: "all_bundle_instances"
+    instance: "left"
+}
+
+group_mapping {
+    group: "all_bundle_instances"
+    instance: "right"
+    # undeclared instance should not appear in config evaluation output
+    instance: "undeclared"
+}

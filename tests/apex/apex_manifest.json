@@ -1,0 +1,10 @@
+{
+  "name": "com.sdv.google.sample.orch.apex",
+  "version": 0,
+  "requireNativeLibs": [
+    "libsdv_comms_ctx_ffi.so",
+    "libsdv_comms_dt_ffi.so",
+    "libsdv_comms_id_ffi.so",
+    "libsdv_comms_sd_ffi.so"
+  ]
+}

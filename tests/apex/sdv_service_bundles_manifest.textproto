@@ -1,0 +1,42 @@
+# Copyright (C) 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# proto-file: //system/software_defined_vehicle/core_services/service_bundles_registry/proto/sdv_service_bundles_manifest.proto
+# proto-message: SdvServiceBundleManifestEntry
+
+# SDV orchestration sample with Rust service bundle.
+sdv_service_bundle_metadata {
+  name: "OrchestratorSampleRustServiceBundle"
+  version_number: 0
+  version_name: "0.1 Alpha"
+  native_library_path: "lib64/liboem_orchestrator_service_bundle_rust_sample.so"
+  orchestration_config_path: "etc/config/orchestration/OrchestratorSampleRustServiceBundle.textproto"
+}
+
+# SDV orchestration sample with C++ service bundle.
+sdv_service_bundle_metadata {
+  name: "OrchestratorSampleCppServiceBundle"
+  version_number: 0
+  version_name: "0.1 Alpha"
+  native_library_path: "lib64/liboem_orchestrator_service_bundle_cpp_sample.so"
+  orchestration_config_path: "etc/config/orchestration/OrchestratorSampleCppServiceBundle.textproto"
+}
+
+# SDV orchestration sample with C++ service bundle.
+sdv_service_bundle_metadata {
+  name: "OrchSampleInitialPowerState"
+  version_number: 0
+  version_name: "0.1 Alpha"
+  native_library_path: "lib64/liboem_orchestrator_service_bundle_rust_sample.so"
+  orchestration_config_path: "etc/config/orchestration/OrchSampleInitialPowerState.textproto"
+}

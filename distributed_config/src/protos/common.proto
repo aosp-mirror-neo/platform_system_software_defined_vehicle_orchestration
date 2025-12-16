@@ -1,0 +1,71 @@
+/*
+ * Copyright (C) 2026 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+// Schema file for the per-Service Bundle part of orchestration configuration.
+
+syntax = "proto3";
+
+package sdv.orch;
+
+// A root boolean condition.
+message Condition {
+  // Required.
+  oneof root {
+    // VPM power state condition.
+    string power_state = 1;
+    // VPM vehicle state condition.
+    string vehicle_state = 2;
+    // Custom mode state condition.
+    CustomState custom_state = 3;
+    // Negation of a nested condition.
+    Condition not = 4;
+    // Logical 'and' between conditions grouped in expression.
+    Expression and = 5;
+    // Logical 'or' between conditions grouped in expression.
+    Expression or = 6;
+  }
+}
+
+// Representation of Custom state condition.
+//
+// Custom mode(s) are defined by the OEM and are not standardized by the platform, in contrast with
+// VPM modes (i.e. power and vehicle mode).
+message CustomState {
+  // Custom mode being checked.
+  string mode = 1;
+  // State of the custom mode.
+  string state = 2;
+}
+
+// A set of conditions united under an 'and' or 'or' expression.
+//
+// Evaluation type ('and' or 'or') depends on the field in [Condition]/[Expression], where the
+// expression is being used.
+//
+// At least one value in at least one of the fields is required.
+message Expression {
+  // VPM power state condition.
+  repeated string power_state = 1;
+  // VPM vehicle state condition.
+  repeated string vehicle_state = 2;
+  // Custom mode state condition.
+  repeated CustomState custom_state = 3;
+  // Negation of a nested condition.
+  repeated Condition not = 4;
+  // Logical 'and' between conditions grouped in expression.
+  repeated Expression and = 5;
+  // Logical 'or' between conditions grouped in expression.
+  repeated Expression or = 6;
+}

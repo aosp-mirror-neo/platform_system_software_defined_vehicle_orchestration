@@ -1,0 +1,40 @@
+/*
+ * Copyright (C) 2026 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+syntax = "proto3";
+import "google/protobuf/timestamp.proto";
+import "sdv/vsidl/v1/annotations.proto";
+
+package com.sdv.google.orchestrator;
+
+// Internal message to propagate new custom mode values to all orchestrators across VMs.
+// This is an internal message that only orchestrators subscribe and publish to.
+// The name and value strings are taken from the RPC SetCustomStateRequest message.
+// Restrictions over what to support on those strings should be impossed in the RPC level.
+message GlobalCustomStateChange {
+  option (.sdv.vsidl.v1.publication) = {
+    model: MULTI_PUB
+    message_count: 100
+  };
+
+  // Name of the custom mode
+  string name = 1 [(.sdv.vsidl.v1.variable_type_max_size) = 56];
+  // New value for the custom mode
+  string value = 2 [(.sdv.vsidl.v1.variable_type_max_size) = 56];
+  // The timestamp at which the value for the custom mode was set.
+  // Used to handle race conditions.
+  .google.protobuf.Timestamp timestamp = 3;
+}
