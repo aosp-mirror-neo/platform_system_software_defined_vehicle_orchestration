@@ -1,0 +1,86 @@
+# Copyright (C) 2026 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# proto-file: system/software_defined_vehicle/orchestration/src/distributed_config/protos/vm_config.proto
+# proto-message: VmConfig
+
+group_mapping {
+    group: "all_instances"
+    subgroup: "left_instances"
+    subgroup: "right_instances"
+}
+
+state {
+    condition {
+        custom_state {
+            mode: "RightTest"
+            state: "Create"
+        }
+    }
+
+    groups_states {
+        created: "right_instances"
+    }
+}
+
+state {
+    condition {
+        custom_state {
+            mode: "RightTest"
+            state: "Start"
+        }
+    }
+
+    groups_states {
+        started: "right_instances"
+    }
+}
+
+state {
+    condition {
+        custom_state {
+            mode: "LeftTest"
+            state: "Start"
+        }
+    }
+
+    groups_states {
+        started: "left_instances"
+    }
+}
+
+state {
+    condition {
+        custom_state {
+            mode: "DestroyTest"
+            state: "AllInstances"
+        }
+    }
+
+    groups_states {
+        destroyed: "all_instances"
+    }
+}
+
+state {
+    condition {
+        custom_state {
+            mode: "DestroyTest"
+            state: "AllBundleInstances"
+        }
+    }
+
+    groups_states {
+        destroyed: "all_bundle_instances"
+    }
+}

@@ -1,0 +1,115 @@
+// Copyright (C) 2026 The Android Open Source Project
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package {
+    default_applicable_licenses: [
+        "Android-Apache-2.0",
+    ],
+}
+
+// Apex to store C++ and Rust orch samples.
+apex {
+    name: "com.sdv.google.sample.orch.apex",
+    native_shared_libs: [
+        // C++ service bundle to be included in the apex.
+        "liboem_orchestrator_service_bundle_cpp_sample",
+        // Rust service bundle to be included in the apex.
+        "liboem_orchestrator_service_bundle_rust_sample",
+    ],
+    // Security contexts to files in the APEX.
+    file_contexts: "orch_sample_apex_file_contexts",
+    // Json manifest file describing meta info of this APEX bundle.
+    // The 'name' filed from this json is used for mounting point.
+    manifest: "apex_manifest.json",
+    prebuilts: [
+        // SDV service bundles manifest file.
+        "com.sdv.google.sample.orch.apex.manifest",
+        // Linker configuration to enable loading library from apex.
+        "com.sdv.google.sample.orch.linker-config",
+        // Orchestration configurations.
+        "OrchestratorSampleRustServiceBundle-orch-config",
+        "OrchestratorSampleCppServiceBundle-orch-config",
+        "OrchSampleInitialPowerState-orch-config",
+    ],
+    // Name of the apex_key module that provides the private key to sign the APEX bundle.
+    key: "com.sdv.google.sample.orch.apex_key",
+    // TODO(b/333868045): make it updatable when all SDV dependencies are ready.
+    updatable: false,
+    // This module is installed into /product partition.
+    product_specific: true,
+}
+
+// The key for signing orch sample apex.
+apex_key {
+    name: "com.sdv.google.sample.orch.apex_key",
+    public_key: "com.sdv.google.sample.orch.apex.avbpubkey",
+    private_key: "com.sdv.google.sample.orch.apex.pem",
+}
+
+// SDV manifest file with the metadata information about service bundles stored in the apex.
+prebuilt_etc {
+    name: "com.sdv.google.sample.orch.apex.manifest",
+    // The source name of the manifest file.
+    src: "sdv_service_bundles_manifest.textproto",
+    // The name of the installed file shall be `sdv_service_bundles_manifest.textproto`.
+    filename: "sdv_service_bundles_manifest.textproto",
+    // Disable direct installation of the manifest to one of the partitions.
+    // The manifest will be used only inside of service bundles registry apexes.
+    installable: false,
+}
+
+// File with the orchestration configuration of service bundle is stored in the apex.
+prebuilt_etc {
+    name: "OrchestratorSampleRustServiceBundle-orch-config",
+    // The source name of the manifest file.
+    src: "OrchestratorSampleRustServiceBundle.textproto",
+    filename: "OrchestratorSampleRustServiceBundle.textproto",
+    sub_dir: "config/orchestration",
+    // Disable direct installation of the manifest to one of the partitions.
+    // The manifest will be used only inside of service bundles registry apexes.
+    installable: false,
+}
+
+// File with the orchestration configuration of service bundle is stored in the apex.
+prebuilt_etc {
+    name: "OrchSampleInitialPowerState-orch-config",
+    // The source name of the manifest file.
+    src: "OrchSampleInitialPowerState.textproto",
+    filename: "OrchSampleInitialPowerState.textproto",
+    sub_dir: "config/orchestration",
+    // Disable direct installation of the manifest to one of the partitions.
+    // The manifest will be used only inside of service bundles registry apexes.
+    installable: false,
+}
+
+// File with the orchestration configuration of service bundle is stored in the apex.
+prebuilt_etc {
+    name: "OrchestratorSampleCppServiceBundle-orch-config",
+    // The source name of the manifest file.
+    src: "OrchestratorSampleCppServiceBundle.textproto",
+    filename: "OrchestratorSampleCppServiceBundle.textproto",
+    sub_dir: "config/orchestration",
+    // Disable direct installation of the manifest to one of the partitions.
+    // The manifest will be used only inside of service bundles registry apexes.
+    installable: false,
+}
+
+// The linker config to allow libraries for the apex to be linkable.
+linker_config {
+    name: "com.sdv.google.sample.orch.linker-config",
+    src: "linker.config.json",
+    // Disable direct installation of the linker config to one of the partitions.
+    // The linker configuration will be used only inside of service bundles registry apexes.
+    installable: false,
+}

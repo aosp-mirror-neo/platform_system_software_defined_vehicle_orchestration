@@ -1,0 +1,62 @@
+/*
+ * Copyright (C) 2026 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+syntax = "proto3";
+
+import "google/protobuf/timestamp.proto";
+
+package com.sdv.google.orchestrator;
+
+// Representation of the request used by service bundles to update a custom mode.
+// Service bundles are permitted to update only the custom modes specifically designated
+// for them within the orchestrator configuration.
+message SetCustomStateRequest {
+  // Required.
+  // The name of the custom mode.
+  // The mode string can not be longer than 56 characters and can only contain letters,
+  // numbers, dashes, dots and underscores: [a-zA-Z0-9_-.]. No other special character nor spaces
+  // should be present in the mode.
+  string mode = 1;
+
+  // Required.
+  // The new value for the custom mode.
+  // The value string can not be longer than 56 characters and can only contain letters,
+  // numbers, dashes, dots and underscores: [a-zA-Z0-9_-.]. No other special character nor spaces
+  // should be present in the value.
+  string value = 2;
+
+  // Required.
+  // The timestamp in which the new custom mode value was set. This is used to prevent race
+  // conditions whenever different service bundles in different VMs want to set a new value for the
+  // same custom mode. We use this timestamp to order the requests and we promise eventual
+  // consistency: while temporary inconsistencies may occur, the system will eventually converge to
+  // the correct state.
+  .google.protobuf.Timestamp timestamp = 3;
+}
+
+// Representation of the set custom state response.
+message SetCustomStateResponse {}
+
+// Orchestrator interface for service bundles that update the value of a custom mode.
+// WHen a new value is received, it is propagated to orchestrators running on other VMs.
+// This interface is private and should only be implemented by the orchestrator.
+service CustomStateService {
+  // Updates the value for the custom mode.
+  // Returns the error:
+  // - PermissionDenied: the service is not authorized to update the custom mode.
+  // - InvalidArgument: the provided mode and/or value are not valid.
+  rpc SetCustomState(SetCustomStateRequest) returns (SetCustomStateResponse) {};
+}

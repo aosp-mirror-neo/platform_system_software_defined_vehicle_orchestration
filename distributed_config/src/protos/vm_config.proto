@@ -1,0 +1,84 @@
+/*
+ * Copyright (C) 2026 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+// Schema file for the per-Service Bundle part of orchestration configuration.
+
+syntax = "proto3";
+
+package sdv.orch;
+
+import "src/protos/common.proto";
+import "src/protos/service_bundle_config.proto";
+
+// VM configuration.
+//
+// Defines group-to-group mappings and configuration for groups
+// states depending on the state of the system.
+//
+// Configurations of service bundles can also be defined in VM configuration (as well as in a
+// separate configuration file).
+message VmConfig {
+  // Group to member groups mapping.
+  repeated GroupToGroupMapping group_mapping = 1;
+
+  // Configuration of group states.
+  repeated GroupsStateConfiguration state = 2;
+
+  // Required. We also allow to configure individual service bundles in the VM config, to simplify
+  // development and migration from the monolithic configuration.
+  repeated ServiceBundleConfig service_bundle_config = 3;
+}
+
+// Mapping of groups to their member groups.
+message GroupToGroupMapping {
+  // Required. Names of groups to which members are added.
+  repeated string group = 1;
+
+  // Required. Names of member groups to be included in the groups.
+  repeated string subgroup = 2;
+}
+
+// Describes the state the service instance groups should be in after the state is executed.
+//
+// If group configuration is valid in a specific system state, the configured state is applied to
+// all group members. After that, the normal service instance configuration rules still apply:
+// - "destroyed" > "started" > "created" precedence
+// - not configured means the instance should be moved to the default state
+//
+// For the GroupsStates definition to be useful, at least one item should be present in any of the
+// fields.
+message GroupsStates {
+  // Names of the groups that must be in a "created" state.
+  repeated string created = 1;
+
+  // Names of the groups that must be in a "started" state, overrides "created" state.
+  repeated string started = 2;
+
+  // Names of the groups that must not run, overrides all other states.
+  repeated string destroyed = 3;
+}
+
+// Configuration for group states depending on the state of the system.
+message GroupsStateConfiguration {
+  // Condition for the system state under which the related group states should be executed by
+  // Orchestrator.
+  //
+  // If omitted, the related groups states will always be executed.
+  Condition condition = 1;
+
+  // Required. States of service bundle groups to be executed by Orchestrator if the condition
+  // is true.
+  GroupsStates groups_states = 2;
+}

@@ -1,0 +1,127 @@
+/*
+ * Copyright (C) 2026 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+// Schema file for the per-Service Bundle part of orchestration configuration.
+
+syntax = "proto3";
+
+package sdv.orch;
+
+import "src/protos/common.proto";
+
+// Service bundle configuration.
+//
+// Defines service bundle data, its instances and configuration for instances
+// states depending on the state of the system
+message ServiceBundleConfig {
+  // Required. Name of the service bundle.
+  string service_bundle_name = 1;
+
+  // Required. Package name of the service bundle.
+  string package_name = 2;
+
+  // Required. Service instances.
+  repeated string instance = 3;
+
+  // Configuration for instances states depending on the state of the system.
+  repeated InstancesStateConfiguration state = 4;
+
+  // Mapping of groups to their member service instances.
+  repeated InstanceToGroupMapping group_mapping = 5;
+
+  // Custom modes that this service bundle is allowed to set.
+  repeated string custom_mode = 6;
+
+  // Defines the retry policies for specific instances.
+  // If multiple mappings target the same instance, the one with the highest `max_retries`
+  // value will take precedence. This applies across all configuration files.
+  repeated InstanceToRetryMapping retry_mapping = 7;
+}
+
+// Mapping of instances to their retry configuration.
+message InstanceToRetryMapping {
+  // Required.
+  //
+  // Name of the instances for which the given retry configuration is applied.
+  repeated string instance = 1;
+
+  // Required.
+  //
+  // The configuration that defines the restart and retry strategy for the instances.
+  RetryConfiguration retry_config = 2;
+
+  // Configuration for retry and restart.
+  // This configuration will be applied after a failure on a transition or after the bundle instance
+  // has crashed. Upon a successful operation, the retry counter are reset to max_retries. This
+  // configuration can be applied to any service bundle, not only the monitored ones. If the
+  // configuration is not provided or none of the optional fields are filled, the default behavior
+  // stated is applied (oneshot instances).
+  message RetryConfiguration {
+    // Required.
+    //
+    // The number of times a retry/restart operation can be performed.
+    // Defines the number of times the orchestrator will retry a transition
+    // after a transient failure or after a bundle crash notification.
+    // This applies to creating, starting and destroying operations.
+    // The retry count will reset to max_retries after a successful operation.
+    // If not set, no retries will be applied (defaults to 0), considering the
+    // bundle as a oneshot service.
+    uint32 max_retries = 1;
+  }
+}
+
+// Mapping of groups to their member service instances.
+message InstanceToGroupMapping {
+  // Required. Names of groups to which members are added.
+  //
+  // Group behavior is defined in VM configuration.
+  repeated string group = 1;
+
+  // Required. Names of instances to be included in the groups.
+  //
+  // Can reference only instance defined in the same config file.
+  repeated string instance = 2;
+}
+
+// Describes the state the service instances should be in after the state is executed.
+//
+// If there's no valid configuration for the instance in the specific system state,
+// such instance will be transitioned to the "destroyed" state.
+//
+// For the GroupsStates definition to be useful, at least one item should be present in any of the
+// fields.
+message InstancesStates {
+  // Names of the instances that must be in a "created" state.
+  repeated string created = 1;
+
+  // Names of the instances that must be in a "started" state, overrides "created" state.
+  repeated string started = 2;
+
+  // Names of the instances that must not run, overrides all other states.
+  repeated string destroyed = 3;
+}
+
+// Configuration for instances states depending on the state of the system.
+message InstancesStateConfiguration {
+  // Condition for the system state under which the related instances states should be executed by
+  // Orchestrator.
+  //
+  // If omitted, the related instances states will always be executed.
+  Condition condition = 1;
+
+  // Required. States of service bundle instances to be executed by Orchestrator if the condition
+  // is true.
+  InstancesStates instances_states = 2;
+}
