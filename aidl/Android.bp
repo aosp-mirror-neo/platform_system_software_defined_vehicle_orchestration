@@ -26,7 +26,7 @@ aidl_interface {
     visibility: [
         // Dependencies to all aidl_interface
         "//system/tools/aidl/build",
-        "//system/software_defined_vehicle/core_services/health_monitor:__subpackages__",
+        "//system/software_defined_vehicle/health_monitor:__subpackages__",
         "//system/software_defined_vehicle/orchestration:__subpackages__",
     ],
     host_supported: true,
