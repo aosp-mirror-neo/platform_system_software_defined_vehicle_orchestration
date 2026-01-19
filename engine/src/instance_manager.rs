@@ -21,6 +21,7 @@ use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ResponseCode::Re
 use log::{debug, info, warn};
 use mockall::automock;
 use persistent_binder::BinderConnectionManager;
+use sdv_orch_dist_config::evaluator::Evaluator;
 use sdv_orchestration_common::fqin::Fqin;
 use sdv_orchestration_common::instance_state::InstanceState;
 use sdv_orchestration_common::retry_configuration::RetryConfiguration;
@@ -136,6 +137,9 @@ pub struct InstanceManager {
     fqin: Fqin,
     /// The LM binder connection to perform transitions.
     lm_connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,
+    /// The orchestrator configuration that will be used in case of a restart when no
+    /// last_requested_state is available.
+    config: Arc<Mutex<Evaluator>>,
 }
 
 impl InstanceManager {
@@ -143,6 +147,7 @@ impl InstanceManager {
         fqin: Fqin,
         lm_connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,
         restart_config: RetryConfiguration,
+        config: Arc<Mutex<Evaluator>>,
     ) -> Arc<Self> {
         let last_enforced_state = Arc::new(Mutex::new(LastState::UNKNOWN));
         let last_requested_state = Arc::new(Mutex::new(None));
@@ -160,6 +165,7 @@ impl InstanceManager {
             current_enforcement_task: current_enforcement_task.clone(),
             fqin: fqin.clone(),
             lm_connection: lm_connection.clone(),
+            config,
         });
 
         // Spawn the enforcement task
@@ -285,15 +291,22 @@ impl InstanceManager {
     fn get_state_to_enforce(&self, request: &TransitionRequest) -> Result<InstanceState, Status> {
         match &request.request_type {
             RequestType::NewMode(state) => Ok(state.clone()),
-            RequestType::Crash => {
-                if let Some(last_state) = self.last_requested_state.lock().unwrap().clone() {
-                    Ok(last_state)
-                } else {
-                    // TODO(b/419239856): if we do not know the last requested state, we should
-                    // read the orch config and fetch it.
-                    Self::to_error(format!("Bundle instance {:?} crashed but there's no state to restart to. Skipping transition.", self.fqin))
-                }
-            }
+            RequestType::Crash => self
+                .last_requested_state
+                .lock()
+                .unwrap()
+                .clone()
+                .or_else(|| {
+                    // If there's no last state, we fetch it from the config.
+                    self.config.lock().unwrap().get_instances_states().get(&self.fqin).cloned()
+                })
+                .ok_or_else(|| {
+                    // We return an error if the instance has no state assigned.
+                    Status::new_service_specific_error(
+                        -1,
+                        Some(&std::ffi::CString::new(format!("Bundle instance {:?} crashed but there's no state to restart to. Skipping transition.", self.fqin)).unwrap()),
+                    )
+                }),
         }
     }
 }
@@ -512,6 +525,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(0),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -543,7 +557,8 @@ mod tests {
         let manager = InstanceManager::new(
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
-            RetryConfiguration::new(0), // Original restart_config is moved here
+            RetryConfiguration::new(0),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -575,6 +590,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(0),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
         // Set that the instance was started before
         *manager.last_enforced_state.lock().unwrap() = LastState::STATE(InstanceState::Started);
@@ -608,6 +624,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(2),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -640,6 +657,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(2),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -672,6 +690,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(5),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -698,6 +717,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(3),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -725,6 +745,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(3),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -750,6 +771,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(3),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
         *manager.last_enforced_state.lock().unwrap() = LastState::STATE(InstanceState::Destroyed);
         // WHEN
@@ -778,6 +800,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(0),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
         *manager.last_enforced_state.lock().unwrap() = LastState::STATE(state.clone());
 
@@ -812,6 +835,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(0),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
         *manager.last_enforced_state.lock().unwrap() = LastState::STATE(InstanceState::Created);
 
@@ -841,6 +865,7 @@ mod tests {
                 fqin.clone(),
                 PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
                 RetryConfiguration::new(0),
+                Arc::new(Mutex::new(Evaluator::new(None, &[]))),
             );
             *manager.last_enforced_state.lock().unwrap() = last_state;
 
@@ -869,6 +894,7 @@ mod tests {
             Fqin::new("com.google.sdv.test", "ServiceName", "instance"),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(3),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -899,6 +925,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(0),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
 
         // Manually add a "create" request to the enforce_queue.
@@ -964,6 +991,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(0), // No retries
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
 
         // Set a last requested state to restart to.
@@ -992,6 +1020,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(5), // With retries
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
 
         // Set a last requested state to restart to.
@@ -1018,6 +1047,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(1), // With retries
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
 
         // Set a last requested state to restart to.
@@ -1044,6 +1074,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(1), // With retries, to make sure it's not the reason for skipping.
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
 
         // Add a pending NewMode request to the queue.
@@ -1062,7 +1093,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_orchestrate_restart_no_last_state() {
+    async fn test_orchestrate_restart_no_state_to_restart_to() {
         // GIVEN
         let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
         let mut mock_lm = MockILifecycleManager::new();
@@ -1073,10 +1104,14 @@ mod tests {
 
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
 
+        // Create an empty evaluator with no configuration.
+        let evaluator = sdv_orch_dist_config::evaluator::Evaluator::new(None, &[]);
+
         let manager = InstanceManager::new(
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(1), // With retries, to show it's not the reason for skipping.
+            Arc::new(Mutex::new(evaluator)),
         );
 
         // WHEN orchestrate_restart is called with no last requested state.
@@ -1119,6 +1154,7 @@ mod tests {
             fqin.clone(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(5),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
 
         // Start a crash recovery task.
@@ -1147,5 +1183,40 @@ mod tests {
         // THEN the crash recovery should be cancelled, and the new request should succeed.
         assert!(crash_receiver.await.unwrap().is_err(), "Crash recovery was not cancelled");
         assert!(new_request_receiver.await.unwrap().is_ok(), "New request did not succeed");
+    }
+
+    #[tokio::test]
+    async fn test_orchestrate_restart_from_config() {
+        // GIVEN
+        let fqin = Fqin::new("com.google.sdv.samples", "sample_service_name", "sample_instance");
+        let mut mock_lm = MockILifecycleManager::new();
+        mock_lm.expect_startService().times(1).returning(|_| Ok(()));
+
+        let fetcher = MockAllLmManagerWrapper::new(mock_lm);
+
+        // Create an evaluator with a configuration that starts the service when Power is ON.
+        let mut evaluator = sdv_orch_dist_config::evaluator::Evaluator::new(
+            Some("src/test_protos/unit_test_config_sample.textproto".to_string()),
+            &[],
+        );
+        evaluator.update_orchestration_state(
+            &sdv_orchestration_common::mode::Mode::Power,
+            "ON",
+            &None,
+        );
+
+        let manager = InstanceManager::new(
+            fqin.clone(),
+            PersistentBinderConnection::new(move || fetcher.get_lm()),
+            RetryConfiguration::new(1), // With retries
+            Arc::new(Mutex::new(evaluator)),
+        );
+
+        // WHEN orchestrate_restart is called and last_requested_state is None.
+        let receiver = manager.orchestrate_restart().unwrap();
+
+        // THEN the restart is successful because the state is fetched from the config.
+        let result = receiver.await.unwrap();
+        assert!(result.is_ok());
     }
 }

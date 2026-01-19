@@ -19,10 +19,12 @@ use crate::instance_manager::{IInstanceManager, InstanceManager};
 use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ILifecycleManager::ILifecycleManager;
 use mockall::automock;
 use persistent_binder::BinderConnectionManager;
+use sdv_orch_dist_config::evaluator::Evaluator;
 use sdv_orchestration_common::fqin::Fqin;
 use sdv_orchestration_common::retry_configuration::RetryConfiguration;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 /// A factory for creating InstanceManagers.
 /// A trait for factories that create `InstanceManager` instances.
@@ -36,6 +38,7 @@ pub trait IInstanceManagerFactory: Send + Sync {
 pub struct InstanceManagerFactory {
     lm_connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,
     restart_config: Arc<HashMap<Fqin, RetryConfiguration>>,
+    config: Arc<Mutex<Evaluator>>,
 }
 
 impl InstanceManagerFactory {
@@ -43,8 +46,9 @@ impl InstanceManagerFactory {
     pub fn new(
         lm_connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,
         restart_config: Arc<HashMap<Fqin, RetryConfiguration>>,
+        config: Arc<Mutex<Evaluator>>,
     ) -> Self {
-        Self { lm_connection, restart_config }
+        Self { lm_connection, restart_config, config }
     }
 }
 
@@ -52,6 +56,11 @@ impl IInstanceManagerFactory for InstanceManagerFactory {
     fn create(&self, fqin: &Fqin) -> Arc<dyn IInstanceManager> {
         let retry_config =
             self.restart_config.get(fqin).cloned().unwrap_or_else(|| RetryConfiguration::new(0));
-        InstanceManager::new(fqin.clone(), self.lm_connection.clone(), retry_config)
+        InstanceManager::new(
+            fqin.clone(),
+            self.lm_connection.clone(),
+            retry_config,
+            self.config.clone(),
+        )
     }
 }

@@ -140,7 +140,7 @@ impl OrchestratorEngine {
     /// Creates a new orchestrator engine that starts and stops service bundles.
     /// Configured service bundles with no conditions attached will be queued to start at this point.
     pub fn new(
-        config: Evaluator,
+        config: Arc<Mutex<Evaluator>>,
         dump_state: Arc<Mutex<Option<String>>>,
         instance_manager_factory: Arc<dyn IInstanceManagerFactory>,
         crash_notifier_connection: Arc<
@@ -148,7 +148,7 @@ impl OrchestratorEngine {
         >,
     ) -> Self {
         let engine = Self {
-            config: Arc::new(Mutex::new(config)),
+            config,
             dump_state,
             instance_manager_factory,
             enforcing_bundles: Arc::new(Mutex::new(HashMap::new())),
@@ -367,12 +367,14 @@ mod tests {
             let lm_interceptor = Arc::new(lm);
             let mock_lm = MockLifecycleManager::create(lm_interceptor.clone());
             let restart_config = Arc::new(config.get_retry_configuration());
+            let evaluator = Arc::new(Mutex::new(config));
             let factory: Arc<dyn IInstanceManagerFactory> = Arc::new(InstanceManagerFactory::new(
                 PersistentBinderConnection::new(move || mock_lm.get_lm()),
                 restart_config,
+                evaluator.clone(),
             ));
             let orch = OrchestratorEngine::new(
-                config,
+                evaluator,
                 Arc::new(Mutex::new(None)),
                 factory,
                 get_mock_crash_notifier_persistent_connection(),
@@ -447,12 +449,14 @@ mod tests {
         // GIVEN
         let mock_lm = Arc::new(ParallelizationLmMock::default());
         let fetcher = ParallelizationLmFetcher { lm: mock_lm.clone() };
+        let evaluator = Arc::new(Mutex::new(Evaluator::new(None, &[])));
         let factory = Arc::new(InstanceManagerFactory::new(
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             Arc::new(HashMap::new()),
+            evaluator.clone(),
         ));
         let test_orch = OrchestratorEngine::new(
-            Evaluator::new(None, &[]),
+            evaluator,
             Arc::new(Mutex::new(None)),
             factory,
             get_mock_crash_notifier_persistent_connection(),
@@ -491,12 +495,14 @@ mod tests {
         // GIVEN
         let mock_lm = Arc::new(FailingParallelizationLmMock::default());
         let fetcher = FailingParallelizationLmFetcher { lm: mock_lm.clone() };
+        let evaluator = Arc::new(Mutex::new(Evaluator::new(None, &[])));
         let factory = Arc::new(InstanceManagerFactory::new(
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             Arc::new(HashMap::new()),
+            evaluator.clone(),
         ));
         let test_orch = OrchestratorEngine::new(
-            Evaluator::new(None, &[]),
+            evaluator,
             Arc::new(Mutex::new(None)),
             factory,
             get_mock_crash_notifier_persistent_connection(),
@@ -532,12 +538,14 @@ mod tests {
         // GIVEN
         let mock_lm = Arc::new(ParallelizationLmMock::default());
         let fetcher = ParallelizationLmFetcher { lm: mock_lm.clone() };
+        let evaluator = Arc::new(Mutex::new(Evaluator::new(None, &[])));
         let factory = Arc::new(InstanceManagerFactory::new(
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             Arc::new(HashMap::new()),
+            evaluator.clone(),
         ));
         let test_orch = OrchestratorEngine::new(
-            Evaluator::new(None, &[]),
+            evaluator,
             Arc::new(Mutex::new(None)),
             factory,
             get_mock_crash_notifier_persistent_connection(),
@@ -881,7 +889,7 @@ mod tests {
         let mut factory = MockIInstanceManagerFactory::new();
         factory.expect_create().returning(move |_| mock_im.clone());
         let orch = OrchestratorEngine::new(
-            config,
+            Arc::new(Mutex::new(config)),
             Arc::new(Mutex::new(None)),
             Arc::new(factory),
             get_mock_crash_notifier_persistent_connection(),
@@ -909,7 +917,7 @@ mod tests {
         let mut factory = MockIInstanceManagerFactory::new();
         factory.expect_create().returning(move |_| mock_im.clone());
         let orch = OrchestratorEngine::new(
-            config,
+            Arc::new(Mutex::new(config)),
             Arc::new(Mutex::new(None)),
             Arc::new(factory),
             get_mock_crash_notifier_persistent_connection(),
@@ -1024,12 +1032,17 @@ mod tests {
         let dump_state_clone = dump_state.clone();
         // WHEN
         tokio::spawn(async move {
+            let evaluator = Arc::new(Mutex::new(Evaluator::new(
+                Some(String::from(TEST_PROTO_NO_CONDITION_PATH)),
+                &[],
+            )));
             let factory = Arc::new(InstanceManagerFactory::new(
                 PersistentBinderConnection::new(move || fetcher.get_lm()),
                 Arc::new(HashMap::new()),
+                evaluator.clone(),
             ));
             let orch = OrchestratorEngine::new(
-                Evaluator::new(Some(String::from(TEST_PROTO_NO_CONDITION_PATH)), &[]),
+                evaluator,
                 dump_state_clone,
                 factory,
                 get_mock_crash_notifier_persistent_connection(),
@@ -1063,12 +1076,17 @@ mod tests {
         let dump_state_clone = dump_state.clone();
         // WHEN
         tokio::spawn(async move {
+            let evaluator = Arc::new(Mutex::new(Evaluator::new(
+                Some(String::from(TEST_PROTO_NO_CONDITION_PATH)),
+                &[],
+            )));
             let factory = Arc::new(InstanceManagerFactory::new(
                 PersistentBinderConnection::new(move || fetcher.get_lm()),
                 Arc::new(HashMap::new()),
+                evaluator.clone(),
             ));
             let orch = OrchestratorEngine::new(
-                Evaluator::new(Some(String::from(TEST_PROTO_NO_CONDITION_PATH)), &[]),
+                evaluator,
                 dump_state_clone,
                 factory,
                 get_mock_crash_notifier_persistent_connection(),
@@ -1155,12 +1173,15 @@ mod tests {
         let dump_state_clone = dump_state.clone();
         // WHEN
         tokio::spawn(async move {
+            let evaluator =
+                Arc::new(Mutex::new(Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[])));
             let factory = Arc::new(InstanceManagerFactory::new(
                 PersistentBinderConnection::new(move || fetcher.get_lm()),
                 Arc::new(HashMap::new()),
+                evaluator.clone(),
             ));
             let orch = OrchestratorEngine::new(
-                Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[]),
+                evaluator,
                 dump_state_clone,
                 factory,
                 get_mock_crash_notifier_persistent_connection(),
@@ -1263,14 +1284,16 @@ mod tests {
             listener(&crash_binder);
         });
         // WHEN creating the engine, we should subscribe for crash notification for the 1st time
+        let evaluator = Arc::new(Mutex::new(Evaluator::new(None, &[])));
         let factory = Arc::new(InstanceManagerFactory::new(
             PersistentBinderConnection::new(move || {
                 MockLifecycleManager::create(Arc::new(LMInterceptor::default())).get_lm()
             }),
             Arc::new(HashMap::new()),
+            evaluator.clone(),
         ));
         OrchestratorEngine::new(
-            Evaluator::new(None, &[]),
+            evaluator,
             Arc::new(Mutex::new(None)),
             factory,
             Arc::new(mock_crash_notifier_binder),
@@ -1297,14 +1320,16 @@ mod tests {
             ),
         )));
         // THEN engine should not panic
+        let evaluator = Arc::new(Mutex::new(Evaluator::new(None, &[])));
         let factory = Arc::new(InstanceManagerFactory::new(
             PersistentBinderConnection::new(move || {
                 MockLifecycleManager::create(Arc::new(LMInterceptor::default())).get_lm()
             }),
             Arc::new(HashMap::new()),
+            evaluator.clone(),
         ));
         OrchestratorEngine::new(
-            Evaluator::new(None, &[]),
+            evaluator,
             Arc::new(Mutex::new(None)),
             factory,
             Arc::new(mock_crash_notifier_binder),
@@ -1327,14 +1352,16 @@ mod tests {
             ),
         )));
         mock_crash_notifier_binder.expect_set_reconnect_listener().returning(|_| ());
+        let evaluator = Arc::new(Mutex::new(Evaluator::new(None, &[])));
         let factory = Arc::new(InstanceManagerFactory::new(
             PersistentBinderConnection::new(move || {
                 MockLifecycleManager::create(Arc::new(LMInterceptor::default())).get_lm()
             }),
             Arc::new(HashMap::new()),
+            evaluator.clone(),
         ));
         let engine = OrchestratorEngine::new(
-            Evaluator::new(None, &[]),
+            evaluator,
             Arc::new(Mutex::new(None)),
             factory,
             Arc::new(mock_crash_notifier_binder),
@@ -1370,7 +1397,7 @@ mod tests {
         factory.expect_create().returning(move |_| mock_im.clone());
 
         let engine = OrchestratorEngine::new(
-            Evaluator::new(None, &[]),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
             Arc::new(Mutex::new(None)),
             Arc::new(factory),
             get_mock_crash_notifier_persistent_connection(),

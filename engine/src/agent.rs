@@ -101,13 +101,17 @@ impl Agent {
         evaluator.restore_modes();
         let modes = evaluator.get_custom_modes();
         let restart_config = Arc::new(evaluator.get_retry_configuration());
+        let evaluator = Arc::new(Mutex::new(evaluator));
         let lm_fetcher = Box::new(LMBinder::default());
         let lm_connection = PersistentBinderConnection::new(move || lm_fetcher.get_lm());
         let crash_notifier: Arc<
             dyn BinderConnectionManager<dyn IServiceBundleCrashNotificationService>,
         > = PersistentBinderConnection::new(Self::get_crash_notification_binder);
-        let instance_manager_factory =
-            Arc::new(InstanceManagerFactory::new(lm_connection.clone(), restart_config));
+        let instance_manager_factory = Arc::new(InstanceManagerFactory::new(
+            lm_connection.clone(),
+            restart_config,
+            evaluator.clone(),
+        ));
         let orch = Arc::new(OrchestratorEngine::new(
             evaluator,
             process_dump_info.clone(),
