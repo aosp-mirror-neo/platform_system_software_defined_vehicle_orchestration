@@ -35,14 +35,17 @@ use sdv_orchestration_common::instance_state::InstanceState;
 use sdv_orchestration_common::mode::{Mode, UpdateEvent};
 use std::collections::HashMap;
 use binder::BinderFeatures;
+use async_trait::async_trait;
+use binder_tokio::TokioRuntime;
+use google_sdv_lifecycle_crash_notification_aidl::aidl::google::sdv::lifecycle::internal::crash_notification::IServiceBundleCrashNotificationCallback::{BnServiceBundleCrashNotificationCallback, IServiceBundleCrashNotificationCallbackAsyncServer};
+use google_sdv_lifecycle_crash_notification_aidl::aidl::google::sdv::lifecycle::internal::crash_notification::IServiceBundleCrashNotificationService::IServiceBundleCrashNotificationService;
 use std::io::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
-use google_sdv_lifecycle_crash_notification_aidl::aidl::google::sdv::lifecycle::internal::crash_notification::IServiceBundleCrashNotificationService::IServiceBundleCrashNotificationService;
-use google_sdv_lifecycle_crash_notification_aidl::aidl::google::sdv::lifecycle::internal::crash_notification::IServiceBundleCrashNotificationCallback::{IServiceBundleCrashNotificationCallback, BnServiceBundleCrashNotificationCallback};
 use std::sync::Mutex;
 use tracing::instrument;
+use tokio::runtime::Handle;
 
 static LM_CALLS_MAX_THREAD_LIMIT: LazyLock<usize> =
     LazyLock::new(|| read_lm_binder_max_parallelism_sys_prop_or_default(read));
@@ -106,8 +109,9 @@ impl DumpStateReporter for OrchestratorEngine {
 impl binder::Interface for OrchestratorEngine {}
 
 #[allow(non_snake_case)]
-impl IServiceBundleCrashNotificationCallback for OrchestratorEngine {
-    fn onServiceBundleCrash(&self, fqin: &ServiceFqin) -> binder::Result<()> {
+#[async_trait]
+impl IServiceBundleCrashNotificationCallbackAsyncServer for OrchestratorEngine {
+    async fn onServiceBundleCrash(&self, fqin: &ServiceFqin) -> binder::Result<()> {
         // Do not change this log as it's used in the SdvE2EOrchestrationBundleRestartedAfterCrashNotificationTest e2e test
         // to verify that the LM crash notification binder API works as expected.
         info!("Service bundle crashed for fqin: {fqin:?}");
@@ -133,14 +137,19 @@ impl OrchestratorEngine {
             instance_manager_factory,
             enforcing_bundles: Arc::new(Mutex::new(HashMap::new())),
         };
+        // We need to get the tokio handle to recreate the crash notification connection
+        // in `subscribe_to_crash_notification`.
+        // Otherwise it's called from a binder thread (on death) instead of tokio one, and panics.
+        let tokio_handle = Handle::current();
         let engine_clone = engine.clone();
         crash_notifier_connection.set_reconnect_listener(Box::new(move |binder| {
             debug!("LM Crash Notifier binder has died, connecting and subscribing again.");
-            subscribe_to_crash_notification(engine_clone.clone(), binder);
+            subscribe_to_crash_notification(engine_clone.clone(), binder, tokio_handle.clone());
         }));
         subscribe_to_crash_notification(
             engine.clone(),
             &crash_notifier_connection.get_binder().lock().unwrap(),
+            Handle::current(),
         );
         engine
     }
@@ -201,9 +210,13 @@ impl OrchestratorEngine {
 pub fn subscribe_to_crash_notification(
     engine: OrchestratorEngine,
     crash_binder: &binder::Strong<dyn IServiceBundleCrashNotificationService>,
+    tokio_handle: Handle,
 ) {
-    let crash_callback =
-        BnServiceBundleCrashNotificationCallback::new_binder(engine, BinderFeatures::default());
+    let crash_callback = BnServiceBundleCrashNotificationCallback::new_async_binder(
+        engine,
+        TokioRuntime(tokio_handle),
+        BinderFeatures::default(),
+    );
     let res = crash_binder.subscribe(&crash_callback);
     if let Err(ref err) = res {
         warn!("Failed to subscribe to crash notifications with error: {:?}", err);
@@ -1250,12 +1263,14 @@ mod tests {
             Arc::new(mock_crash_notifier_binder),
         );
         // WHEN
-        let res = engine.onServiceBundleCrash(&ServiceFqin {
-            sdvVmName: "local-vm".to_owned(),
-            sdvPackageName: "com.google.sdv.test".to_owned(),
-            serviceBundleName: "BundleName".to_owned(),
-            serviceInstanceName: "InstanceName".to_owned(),
-        });
+        let res = engine
+            .onServiceBundleCrash(&ServiceFqin {
+                sdvVmName: "local-vm".to_owned(),
+                sdvPackageName: "com.google.sdv.test".to_owned(),
+                serviceBundleName: "BundleName".to_owned(),
+                serviceInstanceName: "InstanceName".to_owned(),
+            })
+            .await;
         // TODO(b/419239856): extend with expected crash functionality
         assert!(res.is_ok());
     }
