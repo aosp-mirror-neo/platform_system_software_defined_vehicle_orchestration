@@ -16,7 +16,7 @@
 //! Handles the internal orchestrator logic, starting and stopping services on VPM updates.
 
 use crate::instance_manager_factory::InstanceManagerFactory;
-use crate::instance_manager::InstanceManager;
+use crate::instance_manager::{InstanceManager, RequestType};
 use crate::StatesUpdateHandler;
 use crate::instance_manager::TransitionRequest;
 use futures::future;
@@ -115,7 +115,21 @@ impl IServiceBundleCrashNotificationCallbackAsyncServer for OrchestratorEngine {
         // Do not change this log as it's used in the SdvE2EOrchestrationBundleRestartedAfterCrashNotificationTest e2e test
         // to verify that the LM crash notification binder API works as expected.
         info!("Service bundle crashed for fqin: {fqin:?}");
-        // TODO(b/419239856): add bundle restart logic here.
+
+        let instance = Fqin::from_lm_fqin(fqin);
+        let instance_manager = {
+            let mut binding = self.enforcing_bundles.lock().unwrap();
+            binding
+                .entry(instance.clone())
+                .or_insert_with(|| self.instance_manager_factory.create(&instance))
+                .clone()
+        };
+        if !instance_manager.is_restartable() {
+            // Log is used in e2e tests. Please do not change, or update e2e tests if necessary.
+            warn!("Bundle with {:?} has crashed, but it is not restartable.", instance);
+            return Ok(());
+        }
+        instance_manager.orchestrate_restart();
         Ok(())
     }
 }
@@ -186,9 +200,9 @@ impl OrchestratorEngine {
                     };
                     let (responder, receiver) = tokio::sync::oneshot::channel();
                     let request = TransitionRequest {
-                        new_state: state.clone(),
                         cancel: lm_cancel_clone,
                         responder: Some(responder),
+                        request_type: RequestType::NewMode(state.clone()),
                     };
                     instance_manager.orchestrate_transition_request(request);
                     if receiver.blocking_recv().is_ok() {
