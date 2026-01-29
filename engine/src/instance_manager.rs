@@ -36,13 +36,13 @@ use tokio::sync::{oneshot, Notify};
 enum ErrorType {
     /// A temporary error that might be resolved by simply retrying the operation.
     /// No special cleanup action is taken before the next attempt.
-    TRANSIENT,
+    Transient,
     /// An error that suggests the service bundle might be in a corrupted state.
     /// Before retrying, an attempt is made to kill the service instance to ensure a clean restart.
-    PERSISTENT,
+    Persistent,
     /// A permanent error that is unlikely to be resolved by retrying (e.g., PermissionDenied).
     /// No further retry attempts are made.
-    PERMANENT,
+    Permanent,
 }
 
 /// The last state set for the instance.
@@ -50,12 +50,12 @@ enum ErrorType {
 enum LastState {
     /// This case means that we haven't finished applying any transition yet,
     /// or if LM crashed and we invalidated the states.
-    UNKNOWN,
+    Unknown,
     /// Last state transition ended in an error, so we do not know the actual
     /// state for the instance.
-    ERROR,
+    Error,
     /// The successfully set last state for the instance.
-    STATE(InstanceState),
+    State(InstanceState),
 }
 
 /// Type of transition request.
@@ -149,7 +149,7 @@ impl InstanceManager {
         restart_config: RetryConfiguration,
         config: Arc<Mutex<Evaluator>>,
     ) -> Arc<Self> {
-        let last_enforced_state = Arc::new(Mutex::new(LastState::UNKNOWN));
+        let last_enforced_state = Arc::new(Mutex::new(LastState::Unknown));
         let last_requested_state = Arc::new(Mutex::new(None));
         let enforce_queue: Arc<Mutex<std::collections::VecDeque<TransitionRequest>>> =
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -248,13 +248,13 @@ impl InstanceManager {
                 request.cancel.clone(),
             ) {
                 Ok(()) => {
-                    *self.last_enforced_state.lock().unwrap() = LastState::STATE(new_state);
+                    *self.last_enforced_state.lock().unwrap() = LastState::State(new_state);
                     return Ok(());
                 }
                 Err((message, error_type)) => {
-                    *self.last_enforced_state.lock().unwrap() = LastState::ERROR;
+                    *self.last_enforced_state.lock().unwrap() = LastState::Error;
                     retries -= 1;
-                    if error_type == ErrorType::PERMANENT {
+                    if error_type == ErrorType::Permanent {
                         return Err(message);
                     }
                     last_error = Some(message);
@@ -329,7 +329,7 @@ impl IInstanceManager for InstanceManager {
         let last_state_guard = self.last_enforced_state.lock().unwrap();
         // If it's already in requested state, we skip the enforcement.
         if let RequestType::NewMode(ref new_state) = request.request_type {
-            if *last_state_guard == LastState::STATE(new_state.clone()) {
+            if *last_state_guard == LastState::State(new_state.clone()) {
                 info!(
                     "Bundle {:?} is already in desired state {:?}, skipping transition.",
                     self.fqin, new_state
@@ -390,12 +390,12 @@ impl IInstanceManager for InstanceManager {
 
     fn is_created_or_started(&self) -> bool {
         let last_state = self.last_enforced_state.lock().unwrap();
-        *last_state == LastState::STATE(InstanceState::Created)
-            || *last_state == LastState::STATE(InstanceState::Started)
+        *last_state == LastState::State(InstanceState::Created)
+            || *last_state == LastState::State(InstanceState::Started)
     }
 
     fn invalidate_state(&self) {
-        *self.last_enforced_state.lock().unwrap() = LastState::UNKNOWN;
+        *self.last_enforced_state.lock().unwrap() = LastState::Unknown;
     }
 }
 
@@ -413,7 +413,7 @@ impl InstanceManager {
                     -1,
                     Some(&std::ffi::CString::new(error_msg).unwrap()),
                 ),
-                ErrorType::PERMANENT,
+                ErrorType::Permanent,
             ));
         }
         match Self::try_lifecycle_transition(lm_connection.clone(), fqin, &new_state.clone()) {
@@ -429,7 +429,7 @@ impl InstanceManager {
                 );
                 let lm_err_type = Self::get_lm_error(&message);
                 match lm_err_type {
-                    ErrorType::PERSISTENT => {
+                    ErrorType::Persistent => {
                         let lm = lm!(lm_connection).clone();
                         let res = lm.killService(&fqin.to_lm_fqin());
                         if let Err(err) = res {
@@ -454,14 +454,14 @@ impl InstanceManager {
             || error == ResponseCode::OPERATION_FAILED.0
             || error == ResponseCode::INTERNAL_ERROR.0
         {
-            ErrorType::TRANSIENT
+            ErrorType::Transient
         } else if error == ResponseCode::VALUE_CORRUPTED.0
             || error == ResponseCode::INVALID_ARGUMENT.0
         {
-            ErrorType::PERSISTENT
+            ErrorType::Persistent
         } else {
             // PERMISSION_DENIED
-            ErrorType::PERMANENT
+            ErrorType::Permanent
         }
     }
 
@@ -593,7 +593,7 @@ mod tests {
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
         // Set that the instance was started before
-        *manager.last_enforced_state.lock().unwrap() = LastState::STATE(InstanceState::Started);
+        *manager.last_enforced_state.lock().unwrap() = LastState::State(InstanceState::Started);
         // WHEN
         let (responder, receiver) = oneshot::channel();
         let request = TransitionRequest {
@@ -773,7 +773,7 @@ mod tests {
             RetryConfiguration::new(3),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
-        *manager.last_enforced_state.lock().unwrap() = LastState::STATE(InstanceState::Destroyed);
+        *manager.last_enforced_state.lock().unwrap() = LastState::State(InstanceState::Destroyed);
         // WHEN
         let (responder, receiver) = oneshot::channel();
         let request = TransitionRequest {
@@ -802,7 +802,7 @@ mod tests {
             RetryConfiguration::new(0),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
-        *manager.last_enforced_state.lock().unwrap() = LastState::STATE(state.clone());
+        *manager.last_enforced_state.lock().unwrap() = LastState::State(state.clone());
 
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -837,7 +837,7 @@ mod tests {
             RetryConfiguration::new(0),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
         );
-        *manager.last_enforced_state.lock().unwrap() = LastState::STATE(InstanceState::Created);
+        *manager.last_enforced_state.lock().unwrap() = LastState::State(InstanceState::Created);
 
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -856,7 +856,7 @@ mod tests {
     #[tokio::test]
     async fn test_should_not_skip_transition_if_last_state_is_not_set() {
         // GIVEN
-        for last_state in [LastState::UNKNOWN, LastState::ERROR] {
+        for last_state in [LastState::Unknown, LastState::Error] {
             let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
             let mut mock_lm = MockILifecycleManager::new();
             mock_lm.expect_startService().times(1).returning(|_| Ok(()));
