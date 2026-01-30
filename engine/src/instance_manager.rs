@@ -19,6 +19,7 @@ use binder::Status;
 use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ILifecycleManager::ILifecycleManager;
 use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ResponseCode::ResponseCode;
 use log::{debug, info, warn};
+use mockall::automock;
 use persistent_binder::BinderConnectionManager;
 use sdv_orchestration_common::fqin::Fqin;
 use sdv_orchestration_common::instance_state::InstanceState;
@@ -91,6 +92,23 @@ macro_rules! lm {
     ($owner:expr) => {{
         $owner.get_binder().lock().unwrap()
     }};
+}
+
+#[automock]
+pub trait IInstanceManager: Send + Sync {
+    /// Sends a new transition request to the instance manager.
+    /// If the instance is already in the desired state, it will skip the transition.
+    /// If a responder is set for the request, it will be notified when we finished
+    /// executing the transition (either successfully or not).
+    fn orchestrate_transition_request(&self, request: TransitionRequest);
+    /// Sends a transition request to the instance manager after a crash to restart it.
+    /// It will set it to the last requested mode.
+    /// Returns a receiver to wait for the completion of the restart attempt.
+    fn orchestrate_restart(&self) -> Option<oneshot::Receiver<Result<(), Status>>>;
+    /// Returns whether the instance supports restarts based on its configuration.
+    fn is_restartable(&self) -> bool;
+    /// Returns true if the instance has a last enforced state of created or started.
+    fn is_created_or_started(&self) -> bool;
 }
 
 /// Handles the lifecycle of a single bundle instance
@@ -274,13 +292,10 @@ impl InstanceManager {
             }
         }
     }
+}
 
-    /// Sends a new transition request to the instance manager.
-    /// If the instance is already destroyed, it will skip the transition.
-    /// We only check for destroy at this stage as we have not integrated the LM crash recovery yet, so we are not sure of last enforced state.
-    /// If a responder is set for the request, it will be notified when we finished executing the transition (either successfully or not).
-    // TODO(b/419239856): check for all states after last state is invalidated after LM crash.
-    pub fn orchestrate_transition_request(&self, request: TransitionRequest) {
+impl IInstanceManager for InstanceManager {
+    fn orchestrate_transition_request(&self, request: TransitionRequest) {
         // Lock the enforce_queue to prevent other threads to pushing new tasks before
         // we finished processing this one.
         let mut enforce_queue_guard = self.enforce_queue.lock().unwrap();
@@ -324,15 +339,12 @@ impl InstanceManager {
         self.notifier.notify_one();
     }
 
-    /// Returns whether the instance supports restarts based on its configuration.
-    pub fn is_restartable(&self) -> bool {
+    fn is_restartable(&self) -> bool {
         self.restart_config.max_retries > 0
     }
 
-    /// Sends a transition request to the instance manager after a crash to restart it.
-    /// It will set it to the last requested mode.
-    /// Returns a receiver to wait for the completion of the restart attempt.
-    pub fn orchestrate_restart(&self) -> Option<oneshot::Receiver<Result<(), Status>>> {
+    // The return value is used in tests only
+    fn orchestrate_restart(&self) -> Option<oneshot::Receiver<Result<(), Status>>> {
         let mut enforce_queue = self.enforce_queue.lock().unwrap();
         // If there is a request in the queue to transition to a new state, we skip the restart as
         // that transition will handle the state of this instance.
@@ -359,13 +371,14 @@ impl InstanceManager {
         receiver
     }
 
-    /// Returns true if the instance has a last enforced state of created or started.
-    pub fn is_created_or_started(&self) -> bool {
+    fn is_created_or_started(&self) -> bool {
         let last_state = self.last_enforced_state.lock().unwrap();
         *last_state == LastState::STATE(InstanceState::Created)
             || *last_state == LastState::STATE(InstanceState::Started)
     }
+}
 
+impl InstanceManager {
     fn orchestrate_transition_internal(
         fqin: &Fqin,
         lm_connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,

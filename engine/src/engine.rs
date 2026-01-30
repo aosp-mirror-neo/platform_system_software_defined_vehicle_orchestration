@@ -15,8 +15,8 @@
  */
 //! Handles the internal orchestrator logic, starting and stopping services on VPM updates.
 
-use crate::instance_manager_factory::InstanceManagerFactory;
-use crate::instance_manager::{InstanceManager, RequestType};
+use crate::instance_manager_factory::IInstanceManagerFactory;
+use crate::instance_manager::{IInstanceManager, RequestType};
 use crate::StatesUpdateHandler;
 use crate::instance_manager::TransitionRequest;
 use futures::future;
@@ -93,9 +93,9 @@ fn set_orchestrator_ready_prop() {
 pub struct OrchestratorEngine {
     config: Arc<Mutex<Evaluator>>,
     dump_state: Arc<Mutex<Option<String>>>,
-    instance_manager_factory: Arc<InstanceManagerFactory>,
+    instance_manager_factory: Arc<dyn IInstanceManagerFactory>,
     // Avoids creating a new instance manager for already enforced bundles
-    enforcing_bundles: Arc<Mutex<HashMap<Fqin, Arc<InstanceManager>>>>,
+    enforcing_bundles: Arc<Mutex<HashMap<Fqin, Arc<dyn IInstanceManager>>>>,
 }
 
 impl DumpStateReporter for OrchestratorEngine {
@@ -140,7 +140,7 @@ impl OrchestratorEngine {
     pub fn new(
         config: Evaluator,
         dump_state: Arc<Mutex<Option<String>>>,
-        instance_manager_factory: Arc<InstanceManagerFactory>,
+        instance_manager_factory: Arc<dyn IInstanceManagerFactory>,
         crash_notifier_connection: Arc<
             dyn BinderConnectionManager<dyn IServiceBundleCrashNotificationService>,
         >,
@@ -329,10 +329,10 @@ mod tests {
     use sdv_orch_test_mocks::dumpsys_lm_mocks::*;
     use sdv_orch_test_mocks::mock_lm_with_interceptor::*;
     use sdv_orch_test_mocks::parallelization_lm_mock::*;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::Mutex;
     use google_sdv_lifecycle_crash_notification_aidl::aidl::google::sdv::lifecycle::internal::crash_notification::IServiceBundleCrashNotificationService::{MockIServiceBundleCrashNotificationService, BnServiceBundleCrashNotificationService};
+    use crate::instance_manager_factory::IInstanceManagerFactory;
     use tokio::sync::broadcast;
 
     static TEST_PROTO_PATH: &str = "src/test_protos/unit_test_config_sample.textproto";
@@ -359,7 +359,7 @@ mod tests {
             let lm_interceptor = Arc::new(lm);
             let mock_lm = MockLifecycleManager::create(lm_interceptor.clone());
             let restart_config = Arc::new(config.get_retry_configuration());
-            let factory = Arc::new(InstanceManagerFactory::new(
+            let factory: Arc<dyn IInstanceManagerFactory> = Arc::new(InstanceManagerFactory::new(
                 PersistentBinderConnection::new(move || mock_lm.get_lm()),
                 restart_config,
             ));

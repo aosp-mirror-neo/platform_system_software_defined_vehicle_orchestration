@@ -13,8 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+//! Factory for creating `InstanceManager` instances.
 
-use crate::instance_manager::InstanceManager;
+use crate::instance_manager::{IInstanceManager, InstanceManager};
 use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ILifecycleManager::ILifecycleManager;
 use persistent_binder::BinderConnectionManager;
 use sdv_orchestration_common::fqin::Fqin;
@@ -23,6 +24,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A factory for creating InstanceManagers.
+/// A trait for factories that create `InstanceManager` instances.
+pub trait IInstanceManagerFactory: Send + Sync {
+    /// Creates a new `InstanceManager` for the given FQIN.
+    fn create(&self, fqin: &Fqin) -> Arc<dyn IInstanceManager>;
+}
+
+/// The concrete implementation of the `InstanceManager` factory.
 pub struct InstanceManagerFactory {
     lm_connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,
     restart_config: Arc<HashMap<Fqin, RetryConfiguration>>,
@@ -36,9 +44,10 @@ impl InstanceManagerFactory {
     ) -> Self {
         Self { lm_connection, restart_config }
     }
+}
 
-    /// Creates a new InstanceManager for the given FQIN.
-    pub fn create(&self, fqin: &Fqin) -> Arc<InstanceManager> {
+impl IInstanceManagerFactory for InstanceManagerFactory {
+    fn create(&self, fqin: &Fqin) -> Arc<dyn IInstanceManager> {
         let retry_config =
             self.restart_config.get(fqin).cloned().unwrap_or_else(|| RetryConfiguration::new(0));
         InstanceManager::new(fqin.clone(), self.lm_connection.clone(), retry_config)
