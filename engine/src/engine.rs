@@ -79,7 +79,7 @@ fn read_lm_binder_max_parallelism_sys_prop_or_default(
 /// to prevent unnecessary errors in the log.
 fn set_orchestrator_ready_prop() {
     if read(ORCH_STATE_READY_PROP).ok().flatten().as_deref() != Some("true") {
-        if let Err(e) = system_properties::write(ORCH_STATE_READY_PROP, "true") {
+        if let Err(ref e) = system_properties::write(ORCH_STATE_READY_PROP, "true") {
             error!("Couldn't write property '{ORCH_STATE_READY_PROP}': {e}");
         }
     }
@@ -228,8 +228,8 @@ pub fn subscribe_to_crash_notification(
     let crash_callback =
         BnServiceBundleCrashNotificationCallback::new_binder(engine, BinderFeatures::default());
     let res = crash_binder.subscribe(&crash_callback);
-    if res.is_err() {
-        warn!("Failed to subscribe to crash notifications with error: {:?}", res.unwrap_err());
+    if let Err(ref err) = res {
+        warn!("Failed to subscribe to crash notifications with error: {:?}", err);
     }
 }
 

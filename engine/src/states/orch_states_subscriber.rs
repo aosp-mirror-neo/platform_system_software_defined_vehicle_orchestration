@@ -119,7 +119,7 @@ impl OrchStateSubscriber {
         update_sender: Sender<Arc<StateUpdateRequest>>,
         dm: Arc<sdv_dump::DumpManager>,
     ) -> Self {
-        if let Err(err) = sdv_comms_ctx::wait_for_agents() {
+        if let Err(ref err) = sdv_comms_ctx::wait_for_agents() {
             // If we could not wait for agents, orch will panic on ContextRef creation with a generic error.
             // Orch depends on comms for all its behavior, so if there was an initialization problem,
             // nothing will work. We prefer to provide a proper error when panicking.
@@ -185,11 +185,10 @@ impl OrchStateSubscriber {
                 timestamp: None,
             }))
             .await;
-        if res.is_err() {
+        if let Err(ref err) = res {
             warn!(
                 "Failed to send power state update '{}' with error '{:?}'.",
-                power_state_str,
-                res.unwrap_err()
+                power_state_str, err
             );
             // If we failed to send the update, then the receiver will not be notified.
             // So we just return an error.
@@ -303,7 +302,7 @@ async fn handle_vehicle_modes_subscription(
             info!("{subscription_success_log}");
             tracing::event!(Level::DEBUG, subscription_success_log);
             info!("Setting orch vehicle ready property to complete.");
-            if let Err(e) = system_properties::write(ORCH_VEHICLE_READY_PROP, "true") {
+            if let Err(ref e) = system_properties::write(ORCH_VEHICLE_READY_PROP, "true") {
                 error!("Couldn't write {ORCH_VEHICLE_READY_PROP} property: {e}");
             }
             observe_publications_while_publisher_alive(observer, &sender).await;
@@ -387,7 +386,7 @@ impl StatesClientSubscriber for OrchStateSubscriber {
                 let res = orch_comms_clone_clone
                     .subscribe_service_unit_change_by_name(service_unit_change_sender, args)
                     .await;
-                if let Err(err) = res {
+                if let Err(ref err) = res {
                     warn!(
                         "Error initialising Service discovery Manager for vehicle modes with error: {err:?}"
                     );
@@ -469,7 +468,7 @@ impl StatesClientSubscriber for OrchStateSubscriber {
             debug!("{subscription_success_log}");
             tracing::event!(Level::DEBUG, subscription_success_log);
             debug!("Setting orch power ready property to complete.");
-            if let Err(e) = system_properties::write(ORCH_POWER_READY_PROP, "true") {
+            if let Err(ref e) = system_properties::write(ORCH_POWER_READY_PROP, "true") {
                 error!("Couldn't write {ORCH_POWER_READY_PROP} property: {e}");
             }
         }
@@ -502,7 +501,7 @@ impl StatesClientSubscriber for OrchStateSubscriber {
                 } else {
                     warn!("Invalid power_state_state {current_power_state_res:?}");
                 }
-            } else if let Err(err) = current_power_state_res {
+            } else if let Err(ref err) = current_power_state_res {
                 warn!("Failed to resubscribe to VPM power states with error: {err:?}");
             }
         }));
