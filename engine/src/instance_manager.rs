@@ -47,7 +47,8 @@ enum ErrorType {
 /// The last state set for the instance.
 #[derive(PartialEq)]
 enum LastState {
-    /// This case means that we haven't finished applying any transition yet.
+    /// This case means that we haven't finished applying any transition yet,
+    /// or if LM crashed and we invalidated the states.
     UNKNOWN,
     /// Last state transition ended in an error, so we do not know the actual
     /// state for the instance.
@@ -109,6 +110,9 @@ pub trait IInstanceManager: Send + Sync {
     fn is_restartable(&self) -> bool;
     /// Returns true if the instance has a last enforced state of created or started.
     fn is_created_or_started(&self) -> bool;
+    /// Invalidates the last enforced state of the instance.
+    /// This is used when the LM crashes and we don't know the actual state of the instance.
+    fn invalidate_state(&self);
 }
 
 /// Handles the lifecycle of a single bundle instance
@@ -310,23 +314,23 @@ impl IInstanceManager for InstanceManager {
         enforce_queue_guard.retain(|req| matches!(req.request_type, RequestType::NewMode(_)));
 
         let last_state_guard = self.last_enforced_state.lock().unwrap();
-        // If it's already destroyed, we skip the enforcement.
-        // If last state was an error, we don't know if it's actually destroy,
-        // so we don't skip the destroyment.
-        if request.request_type == RequestType::NewMode(InstanceState::Destroyed)
-            && (*last_state_guard == LastState::STATE(InstanceState::Destroyed)
-                || *last_state_guard == LastState::UNKNOWN)
-        {
-            info!("Bundle {:?} is already destroyed, skipping transition.", self.fqin);
-            if let Some(responder) = request.responder {
-                let res = responder.send(Ok(()));
-                if let Err(err) = res {
-                    warn!(
-                        "Failed to notify skipped destroying of instance {:?}: {err:?}",
-                        self.fqin
-                    );
+        // If it's already in requested state, we skip the enforcement.
+        if let RequestType::NewMode(ref new_state) = request.request_type {
+            if *last_state_guard == LastState::STATE(new_state.clone()) {
+                info!(
+                    "Bundle {:?} is already in desired state {:?}, skipping transition.",
+                    self.fqin, new_state
+                );
+                if let Some(responder) = request.responder {
+                    let res = responder.send(Ok(()));
+                    if let Err(err) = res {
+                        warn!(
+                            "Failed to notify skipped transition {:?} for instance {:?}: {err:?}",
+                            new_state, self.fqin
+                        );
+                    }
+                    return;
                 }
-                return;
             }
         }
 
@@ -375,6 +379,10 @@ impl IInstanceManager for InstanceManager {
         let last_state = self.last_enforced_state.lock().unwrap();
         *last_state == LastState::STATE(InstanceState::Created)
             || *last_state == LastState::STATE(InstanceState::Started)
+    }
+
+    fn invalidate_state(&self) {
+        *self.last_enforced_state.lock().unwrap() = LastState::UNKNOWN;
     }
 }
 
@@ -704,12 +712,14 @@ mod tests {
         assert!(res.is_ok());
     }
 
+    // As state is unknown, we do not know if instance is destroyed or not (as could be from
+    // the LM crash), so we proceed to destroy.
     #[tokio::test]
-    async fn test_should_not_destroy_instance_with_no_state() {
+    async fn test_should_destroy_instance_with_no_state() {
         // GIVEN
         let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
         let mut mock_lm = MockILifecycleManager::new();
-        mock_lm.expect_shutdownService().never();
+        mock_lm.expect_shutdownService().times(1).returning(|_| Ok(()));
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
             fqin.clone(),
@@ -753,6 +763,100 @@ mod tests {
         let res = receiver.await.unwrap();
         // THEN
         assert!(res.is_ok());
+    }
+
+    async fn helper_test_should_skip_transition_if_already_in_state(state: InstanceState) {
+        // GIVEN
+        let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
+        let mut mock_lm = MockILifecycleManager::new();
+        // We expect no calls to LM because the state is already correct.
+        mock_lm.expect_startService().never();
+        mock_lm.expect_launchService().never();
+        mock_lm.expect_shutdownService().never();
+        let fetcher = MockAllLmManagerWrapper::new(mock_lm);
+        let manager = InstanceManager::new(
+            fqin.clone(),
+            PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
+            RetryConfiguration::new(0),
+        );
+        *manager.last_enforced_state.lock().unwrap() = LastState::STATE(state.clone());
+
+        // WHEN
+        let (responder, receiver) = oneshot::channel();
+        let request = TransitionRequest {
+            cancel: Arc::new(AtomicBool::new(false)),
+            responder: Some(responder),
+            request_type: RequestType::NewMode(state),
+        };
+        manager.orchestrate_transition_request(request);
+        let res = receiver.await.unwrap();
+        // THEN the responder should receive Ok, and no LM calls should have been made.
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_should_skip_transitions_if_already_in_state() {
+        helper_test_should_skip_transition_if_already_in_state(InstanceState::Created).await;
+        helper_test_should_skip_transition_if_already_in_state(InstanceState::Started).await;
+        helper_test_should_skip_transition_if_already_in_state(InstanceState::Destroyed).await;
+    }
+
+    #[tokio::test]
+    async fn test_should_not_skip_transition_if_last_state_is_different() {
+        // GIVEN
+        let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
+        let mut mock_lm = MockILifecycleManager::new();
+        mock_lm.expect_startService().times(1).returning(|_| Ok(()));
+        let fetcher = MockAllLmManagerWrapper::new(mock_lm);
+        let manager = InstanceManager::new(
+            fqin.clone(),
+            PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
+            RetryConfiguration::new(0),
+        );
+        *manager.last_enforced_state.lock().unwrap() = LastState::STATE(InstanceState::Created);
+
+        // WHEN
+        let (responder, receiver) = oneshot::channel();
+        let request = TransitionRequest {
+            cancel: Arc::new(AtomicBool::new(false)),
+            responder: Some(responder),
+            request_type: RequestType::NewMode(InstanceState::Started),
+        };
+        manager.orchestrate_transition_request(request);
+        let res = receiver.await.unwrap();
+
+        // THEN the transition should proceed and succeed.
+        assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_should_not_skip_transition_if_last_state_is_not_set() {
+        // GIVEN
+        for last_state in [LastState::UNKNOWN, LastState::ERROR] {
+            let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
+            let mut mock_lm = MockILifecycleManager::new();
+            mock_lm.expect_startService().times(1).returning(|_| Ok(()));
+            let fetcher = MockAllLmManagerWrapper::new(mock_lm);
+            let manager = InstanceManager::new(
+                fqin.clone(),
+                PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
+                RetryConfiguration::new(0),
+            );
+            *manager.last_enforced_state.lock().unwrap() = last_state;
+
+            // WHEN
+            let (responder, receiver) = oneshot::channel();
+            let request = TransitionRequest {
+                cancel: Arc::new(AtomicBool::new(false)),
+                responder: Some(responder),
+                request_type: RequestType::NewMode(InstanceState::Started),
+            };
+            manager.orchestrate_transition_request(request);
+            let res = receiver.await.unwrap();
+
+            // THEN the transition should proceed and succeed.
+            assert!(res.is_ok());
+        }
     }
 
     #[tokio::test]

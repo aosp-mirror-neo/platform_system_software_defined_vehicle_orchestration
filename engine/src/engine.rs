@@ -124,6 +124,8 @@ impl IServiceBundleCrashNotificationCallbackAsyncServer for OrchestratorEngine {
                 .or_insert_with(|| self.instance_manager_factory.create(&instance))
                 .clone()
         };
+        // If the bundle has crashed, the state we have assigned previously is not valid anymore.
+        instance_manager.invalidate_state();
         if !instance_manager.is_restartable() {
             // Log is used in e2e tests. Please do not change, or update e2e tests if necessary.
             warn!("Bundle with {:?} has crashed, but it is not restartable.", instance);
@@ -288,7 +290,11 @@ impl StatesUpdateHandler for OrchestratorEngine {
             return;
         }
 
-        // TODO(b/419239856): invalidate state from all bundles on LM crash (UpdateEvent::Recovery).
+        if *event == UpdateEvent::Recovery {
+            self.enforcing_bundles.lock().unwrap().iter().for_each(|(_, instance)| {
+                instance.invalidate_state();
+            });
+        }
 
         let state = event.to_string();
         *self.dump_state.lock().unwrap() = Some(state.clone());
@@ -316,6 +322,7 @@ impl StatesUpdateHandler for OrchestratorEngine {
 mod tests {
     use super::*;
     use crate::instance_manager_factory::InstanceManagerFactory;
+    use crate::instance_manager::MockIInstanceManager;
     use crate::LifecycleManagerFetcher;
     use crate::OrchestratorEngine;
     use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ILifecycleManager::ILifecycleManager;
@@ -333,6 +340,7 @@ mod tests {
     use std::sync::Mutex;
     use google_sdv_lifecycle_crash_notification_aidl::aidl::google::sdv::lifecycle::internal::crash_notification::IServiceBundleCrashNotificationService::{MockIServiceBundleCrashNotificationService, BnServiceBundleCrashNotificationService};
     use crate::instance_manager_factory::IInstanceManagerFactory;
+    use crate::instance_manager_factory::MockIInstanceManagerFactory;
     use tokio::sync::broadcast;
 
     static TEST_PROTO_PATH: &str = "src/test_protos/unit_test_config_sample.textproto";
@@ -609,7 +617,7 @@ mod tests {
             .await;
 
         // THEN
-        test_context.assert_lm_calls(&fqin, vec![]);
+        test_context.assert_lm_calls(&fqin, vec![LMCall::Shutdown]);
         // We don't remove the instance manager when destroying
         assert_that!(test_context.orch.enforcing_bundles.lock().unwrap().len(), eq(1));
     }
@@ -854,6 +862,61 @@ mod tests {
             .await;
         // THEN
         test_context.assert_lm_calls(&fqin, vec![]);
+    }
+
+    #[tokio::test]
+    async fn test_on_recovery_event_should_invalidate_instance_states() {
+        // GIVEN
+        let config = Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[]);
+
+        let mut mock_im = MockIInstanceManager::new();
+        // We expect `invalidate_state` to be called exactly once.
+        mock_im.expect_invalidate_state().times(1).return_const(());
+        // We need to mock `is_created_or_started` as it's called when destroying obsolete services.
+        mock_im.expect_is_created_or_started().returning(|| true);
+        // We need to mock `orchestrate_transition_request` as it's called to enforce the new state.
+        mock_im.expect_orchestrate_transition_request().return_const(());
+        let mock_im = Arc::new(mock_im);
+
+        let mut factory = MockIInstanceManagerFactory::new();
+        factory.expect_create().returning(move |_| mock_im.clone());
+        let orch = OrchestratorEngine::new(
+            config,
+            Arc::new(Mutex::new(None)),
+            Arc::new(factory),
+            get_mock_crash_notifier_persistent_connection(),
+        );
+
+        // Enforce an initial state to populate `enforcing_bundles`.
+        orch.on_state_update(&Mode::Power, "ON", Arc::new(AtomicBool::new(false)), &None).await;
+
+        // WHEN a recovery event occurs.
+        orch.on_event_update(&UpdateEvent::Recovery, Arc::new(AtomicBool::new(false))).await;
+    }
+
+    #[tokio::test]
+    async fn test_on_default_event_should_not_invalidate_instance_states() {
+        // GIVEN
+        let config = Evaluator::new(Some(String::from(TEST_PROTO_NO_CONDITION_PATH)), &[]);
+
+        let mut mock_im = MockIInstanceManager::new();
+        // We expect `invalidate_state` to never be called.
+        mock_im.expect_invalidate_state().never();
+        mock_im.expect_is_created_or_started().returning(|| false);
+        mock_im.expect_orchestrate_transition_request().return_const(());
+        let mock_im = Arc::new(mock_im);
+
+        let mut factory = MockIInstanceManagerFactory::new();
+        factory.expect_create().returning(move |_| mock_im.clone());
+        let orch = OrchestratorEngine::new(
+            config,
+            Arc::new(Mutex::new(None)),
+            Arc::new(factory),
+            get_mock_crash_notifier_persistent_connection(),
+        );
+
+        // WHEN a default event occurs.
+        orch.on_event_update(&UpdateEvent::Default, Arc::new(AtomicBool::new(false))).await;
     }
 
     // On default state test
@@ -1287,5 +1350,34 @@ mod tests {
             .await;
         // TODO(b/419239856): extend with expected crash functionality
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_on_crash_notification_invalidates_state() {
+        // GIVEN
+        let fqin = Fqin::new("com.google.sdv.test", "BundleName", "InstanceName");
+        let lm_fqin = fqin.to_lm_fqin();
+
+        let mut mock_im = MockIInstanceManager::new();
+        // THEN we expect invalidate_state to be called.
+        mock_im.expect_invalidate_state().times(1).return_const(());
+        // And since we'll mock it as not restartable, orchestrate_restart should not be called.
+        mock_im.expect_is_restartable().times(1).returning(|| false);
+        mock_im.expect_orchestrate_restart().never();
+
+        let mock_im = Arc::new(mock_im);
+        let mut factory = MockIInstanceManagerFactory::new();
+        factory.expect_create().returning(move |_| mock_im.clone());
+
+        let engine = OrchestratorEngine::new(
+            Evaluator::new(None, &[]),
+            Arc::new(Mutex::new(None)),
+            Arc::new(factory),
+            get_mock_crash_notifier_persistent_connection(),
+        );
+
+        // WHEN a crash notification is received for the bundle.
+        let result = engine.onServiceBundleCrash(&lm_fqin).await;
+        assert!(result.is_ok());
     }
 }

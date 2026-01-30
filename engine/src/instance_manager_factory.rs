@@ -17,6 +17,7 @@
 
 use crate::instance_manager::{IInstanceManager, InstanceManager};
 use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ILifecycleManager::ILifecycleManager;
+use mockall::automock;
 use persistent_binder::BinderConnectionManager;
 use sdv_orchestration_common::fqin::Fqin;
 use sdv_orchestration_common::retry_configuration::RetryConfiguration;
@@ -25,6 +26,7 @@ use std::sync::Arc;
 
 /// A factory for creating InstanceManagers.
 /// A trait for factories that create `InstanceManager` instances.
+#[automock]
 pub trait IInstanceManagerFactory: Send + Sync {
     /// Creates a new `InstanceManager` for the given FQIN.
     fn create(&self, fqin: &Fqin) -> Arc<dyn IInstanceManager>;
