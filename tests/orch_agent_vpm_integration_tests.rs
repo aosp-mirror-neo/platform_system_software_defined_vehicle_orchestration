@@ -20,7 +20,7 @@
 
 #[cfg(test)]
 mod tests {
-    use com_sdv_google_vpm_vpm_system_service_rpc::Client as VpmClient;
+    use com_android_sdv_vpm_vpm_system_service_rpc::Client as VpmClient;
     use google_sdv_identity::aidl::google::sdv::identity::ServiceFqin::ServiceFqin;
     use named_lock::NamedLock;
     use sdv_comms::id::ServiceFqin as Fqin;
@@ -52,7 +52,7 @@ mod tests {
             let vpm_client = bundle
                 .create_rpc_client::<VpmClient>(
                     UnitName::builder()
-                        .package_name("com.sdv.google.vpm")
+                        .package_name("com.android.sdv.vpm")
                         .bundle_name("VpmSystemServiceBundle")
                         .service_unit_name(VpmClient::DEFAULT_UNIT_NAME)
                         .build()

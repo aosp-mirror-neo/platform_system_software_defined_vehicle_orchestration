@@ -70,9 +70,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{event, instrument, Level};
 
 const VPM_SYSTEM_SERVICE_BUNDLE_NAME: &str = "VpmSystemServiceBundle";
-const VPM_SYSTEM_SERVICE_PACKAGE_NAME: &str = "com.sdv.google.vpm";
+const VPM_SYSTEM_SERVICE_PACKAGE_NAME: &str = "com.android.sdv.vpm";
 const VPM_SYSTEM_SERVICE_SERVICE_UNIT_NAME: &str =
-    "com-sdv-google-vpm-vehicle-vehicle-state-change-unique";
+    "com-android-sdv-vpm-vehicle-vehicle-state-change-unique";
 const POLLING_TIME: Duration = Duration::from_millis(50);
 
 #[automock]
