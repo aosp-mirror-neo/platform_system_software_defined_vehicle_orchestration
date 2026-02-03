@@ -133,7 +133,7 @@ impl OrchStateSubscriber {
             .build()
             .unwrap();
         let context_ref = ContextRef::create(fqin.clone());
-        dm.set_self_fqin(&context_ref.get_self_fqin());
+        dm.set_self_fqin(context_ref.get_self_fqin().to_string());
         let comms = Arc::new(SdvComms { context: context_ref });
         let vpm_connection = PersistentBinderConnection::new(get_vpm_binder_service);
 
