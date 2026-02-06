@@ -24,6 +24,6 @@ service_bundle {
     }
 
     client {
-        service: "com.sdv.google.vpm.VpmSystemService"
+        service: "com.android.sdv.vpm.VpmSystemService"
     }
 }

@@ -19,7 +19,7 @@ package: "com.sdv.google.orchestrator"
 service_bundle {
     name: "OrchestratorServiceBundle"
     subscriber {
-        message: "com.sdv.google.vpm.vehicle.VehicleStateChange"
+        message: "com.android.sdv.vpm.vehicle.VehicleStateChange"
     }
 
     # Propagation of custom modes to other VMs
