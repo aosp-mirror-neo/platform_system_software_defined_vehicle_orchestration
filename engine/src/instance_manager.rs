@@ -16,8 +16,13 @@
 //! Handles the lifecycle state machine for one single service bundle instance.
 
 use binder::Status;
+use binder::Strong;
+use google_sdv_identity::aidl::google::sdv::identity::ServiceFqin::ServiceFqin as AidlFqin;
 use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ILifecycleManager::ILifecycleManager;
 use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ResponseCode::ResponseCode;
+use google_sdv_orchestration::aidl::google::sdv::orchestration::ServiceBundleInstanceRecoveryState::ServiceBundleInstanceRecoveryState;
+use google_sdv_orchestration::aidl::google::sdv::orchestration::ServiceBundleInstanceLifecycleState::ServiceBundleInstanceLifecycleState;
+use google_sdv_orchestration::aidl::google::sdv::orchestration::IServiceBundleInstanceStateChangeListener::IServiceBundleInstanceStateChangeListener;
 use log::{debug, info, warn};
 use mockall::automock;
 use persistent_binder::BinderConnectionManager;
@@ -25,6 +30,7 @@ use sdv_orch_dist_config::evaluator::Evaluator;
 use sdv_orchestration_common::fqin::Fqin;
 use sdv_orchestration_common::instance_state::InstanceState;
 use sdv_orchestration_common::retry_configuration::RetryConfiguration;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -134,20 +140,25 @@ pub struct InstanceManager {
     /// Current task in progress to allow cancellation.
     current_enforcement_task: Arc<Mutex<Option<CurrentTaskInfo>>>,
     /// The FQIN of the service bundle instance managed by this manager.
-    fqin: Fqin,
+    fqin: AidlFqin,
     /// The LM binder connection to perform transitions.
     lm_connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,
     /// The orchestrator configuration that will be used in case of a restart when no
     /// last_requested_state is available.
     config: Arc<Mutex<Evaluator>>,
+    bundle_updates_subscribers:
+        Arc<Mutex<HashMap<u32, Strong<dyn IServiceBundleInstanceStateChangeListener>>>>,
 }
 
 impl InstanceManager {
     pub fn new(
-        fqin: Fqin,
+        fqin: AidlFqin,
         lm_connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,
         restart_config: RetryConfiguration,
         config: Arc<Mutex<Evaluator>>,
+        bundle_updates_subscribers: Arc<
+            Mutex<HashMap<u32, Strong<dyn IServiceBundleInstanceStateChangeListener>>>,
+        >,
     ) -> Arc<Self> {
         let last_enforced_state = Arc::new(Mutex::new(LastState::Unknown));
         let last_requested_state = Arc::new(Mutex::new(None));
@@ -163,9 +174,10 @@ impl InstanceManager {
             restart_config,
             notifier: notifier.clone(),
             current_enforcement_task: current_enforcement_task.clone(),
-            fqin: fqin.clone(),
+            fqin,
             lm_connection: lm_connection.clone(),
             config,
+            bundle_updates_subscribers,
         });
 
         // Spawn the enforcement task
@@ -227,7 +239,7 @@ impl InstanceManager {
     /// Enforces a transition request, handling retries and cancellation.
     /// Returns a result to be sent to the request's responder.
     fn enforce_transition(&self, request: &TransitionRequest) -> Result<(), Status> {
-        let mut retries = match request.request_type {
+        let retries = match request.request_type {
             // In case of a new mode, we add 1 on top of the retries as the first
             // request is not from retries.
             RequestType::NewMode(_) => self.restart_config.max_retries + 1,
@@ -238,9 +250,28 @@ impl InstanceManager {
 
         let new_state = self.get_state_to_enforce(request)?;
 
+        let expected_lifecycle_state = &match new_state {
+            InstanceState::Destroyed => ServiceBundleInstanceLifecycleState::DESTROYED,
+            InstanceState::Started => ServiceBundleInstanceLifecycleState::STARTED,
+            InstanceState::Created => ServiceBundleInstanceLifecycleState::CREATED,
+        };
+
         // This tracks the last error received within all the retries.
         let mut last_error: Option<Status> = None;
-        while retries > 0 && !request.cancel.load(Ordering::Relaxed) {
+        for attempt in 0..retries {
+            if request.cancel.load(Ordering::Relaxed) {
+                break;
+            }
+
+            // We notify we are retrying either after the 2nd request in case of NewMode
+            // or every time in case of Crash.
+            if attempt > 0 || request.request_type == RequestType::Crash {
+                self.notify_bundle_state_change(
+                    &ServiceBundleInstanceRecoveryState::RETRYING,
+                    expected_lifecycle_state,
+                );
+            }
+
             match Self::orchestrate_transition_internal(
                 &self.fqin,
                 self.lm_connection.clone(),
@@ -248,13 +279,20 @@ impl InstanceManager {
                 request.cancel.clone(),
             ) {
                 Ok(()) => {
-                    *self.last_enforced_state.lock().unwrap() = LastState::State(new_state);
+                    *self.last_enforced_state.lock().unwrap() = LastState::State(new_state.clone());
+                    self.notify_bundle_state_change(
+                        &ServiceBundleInstanceRecoveryState::OPERATIONAL,
+                        expected_lifecycle_state,
+                    );
                     return Ok(());
                 }
                 Err((message, error_type)) => {
                     *self.last_enforced_state.lock().unwrap() = LastState::Error;
-                    retries -= 1;
                     if error_type == ErrorType::Permanent {
+                        self.notify_bundle_state_change(
+                            &ServiceBundleInstanceRecoveryState::RETRY_FAILED,
+                            expected_lifecycle_state,
+                        );
                         return Err(message);
                     }
                     last_error = Some(message);
@@ -262,23 +300,26 @@ impl InstanceManager {
             };
         }
 
-        if let Some(err) = last_error {
-            return Err(err);
-        }
+        self.notify_bundle_state_change(
+            &ServiceBundleInstanceRecoveryState::RETRY_FAILED,
+            expected_lifecycle_state,
+        );
 
         if request.cancel.load(Ordering::Relaxed) {
             return Self::to_error(format!(
                 "Enforcement for {:?} to {:?} was cancelled",
                 self.fqin, request.request_type
             ));
-        } else if retries == 0 {
-            return Self::to_error(format!(
-                "No retries left to transition {:?} to {:?}",
-                self.fqin, new_state
-            ));
         }
 
-        Ok(())
+        if let Some(err) = last_error {
+            Err(err)
+        } else {
+            Self::to_error(format!(
+                "No retries left to transition {:?} to {:?}",
+                self.fqin, new_state
+            ))
+        }
     }
 
     fn to_error<T>(error_msg: String) -> Result<T, Status> {
@@ -298,7 +339,7 @@ impl InstanceManager {
                 .clone()
                 .or_else(|| {
                     // If there's no last state, we fetch it from the config.
-                    self.config.lock().unwrap().get_instances_states().get(&self.fqin).cloned()
+                    self.config.lock().unwrap().get_instances_states().get(&Fqin::from_lm_fqin(&self.fqin)).cloned()
                 })
                 .ok_or_else(|| {
                     // We return an error if the instance has no state assigned.
@@ -308,6 +349,21 @@ impl InstanceManager {
                     )
                 }),
         }
+    }
+
+    fn notify_bundle_state_change(
+        &self,
+        recovery_state: &ServiceBundleInstanceRecoveryState,
+        expected_state: &ServiceBundleInstanceLifecycleState,
+    ) {
+        self.bundle_updates_subscribers.lock().unwrap().iter().for_each(|(uid, listener)| {
+            if let Err(e) = listener.onServiceBundleInstanceStateChanged(&self.fqin, *recovery_state, *expected_state) {
+                warn!(
+                    "Failed to notify subscriber with UID {uid} of bundle instance {:?} state change to {:?}-{:?}: {e:?}",
+                    self.fqin, recovery_state, expected_state
+                );
+            }
+        });
     }
 }
 
@@ -401,7 +457,7 @@ impl IInstanceManager for InstanceManager {
 
 impl InstanceManager {
     fn orchestrate_transition_internal(
-        fqin: &Fqin,
+        fqin: &AidlFqin,
         lm_connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,
         new_state: InstanceState,
         cancel: Arc<AtomicBool>,
@@ -431,7 +487,7 @@ impl InstanceManager {
                 match lm_err_type {
                     ErrorType::Persistent => {
                         let lm = lm!(lm_connection).clone();
-                        let res = lm.killService(&fqin.to_lm_fqin());
+                        let res = lm.killService(fqin);
                         if let Err(err) = res {
                             warn!(
                                 "Failed to kill the bundle instance {:?} when retrying: {err:?}",
@@ -467,28 +523,28 @@ impl InstanceManager {
 
     fn try_lifecycle_transition(
         connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,
-        fqin: &Fqin,
+        fqin: &AidlFqin,
         state: &InstanceState,
     ) -> Result<(), Status> {
         match state {
             InstanceState::Created => {
                 debug!("Requesting created state for service bundle {fqin:?}");
                 let lm = lm!(connection).clone();
-                let res = lm.launchService(&fqin.to_lm_fqin());
+                let res = lm.launchService(fqin);
                 info!("Request for moving service bundle {fqin:?} to CREATED state was {res:?}");
                 res
             }
             InstanceState::Started => {
                 debug!("Requesting started state for service bundle {fqin:?}");
                 let lm = lm!(connection).clone();
-                let res = lm.startService(&fqin.to_lm_fqin());
+                let res = lm.startService(fqin);
                 info!("Request for moving service bundle {fqin:?} to STARTED state was {res:?}");
                 res
             }
             InstanceState::Destroyed => {
                 debug!("Requesting destroyed state for service bundle {fqin:?}");
                 let lm = lm!(connection).clone();
-                let res = lm.shutdownService(&fqin.to_lm_fqin());
+                let res = lm.shutdownService(fqin);
                 info!("Request for moving service bundle {fqin:?} to DESTROYED state was {res:?}");
                 res
             }
@@ -500,7 +556,15 @@ impl InstanceManager {
 mod tests {
     use super::*;
     use crate::LifecycleManagerFetcher;
+    use binder::{BinderFeatures, Result as BinderResult};
     use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ILifecycleManager::MockILifecycleManager;
+    use google_sdv_orchestration::aidl::google::sdv::orchestration::{
+        IServiceBundleInstanceStateChangeListener::{
+            BnServiceBundleInstanceStateChangeListener, IServiceBundleInstanceStateChangeListener,
+            MockIServiceBundleInstanceStateChangeListener,
+        },
+        ServiceBundleInstanceRecoveryState::ServiceBundleInstanceRecoveryState,
+    };
     use persistent_binder::PersistentBinderConnection;
     use sdv_orch_test_mocks::mock_all_lm_manager_wrapper::MockAllLmManagerWrapper;
 
@@ -522,10 +586,11 @@ mod tests {
         });
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(0),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -555,10 +620,11 @@ mod tests {
         });
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(0),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -587,10 +653,11 @@ mod tests {
         });
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(0),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
         // Set that the instance was started before
         *manager.last_enforced_state.lock().unwrap() = LastState::State(InstanceState::Started);
@@ -621,10 +688,11 @@ mod tests {
             .returning(move |_| Err(Status::new_service_specific_error(expected_error_code, None)));
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(2),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -654,10 +722,11 @@ mod tests {
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
 
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(2),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -687,10 +756,11 @@ mod tests {
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
 
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(5),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -714,10 +784,11 @@ mod tests {
         mock_lm.expect_startService().times(1).returning(|_| Ok(()));
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(3),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -742,10 +813,11 @@ mod tests {
         mock_lm.expect_shutdownService().times(1).returning(|_| Ok(()));
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(3),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -768,10 +840,11 @@ mod tests {
         mock_lm.expect_shutdownService().never();
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(3),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
         *manager.last_enforced_state.lock().unwrap() = LastState::State(InstanceState::Destroyed);
         // WHEN
@@ -797,10 +870,11 @@ mod tests {
         mock_lm.expect_shutdownService().never();
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(0),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
         *manager.last_enforced_state.lock().unwrap() = LastState::State(state.clone());
 
@@ -832,10 +906,11 @@ mod tests {
         mock_lm.expect_startService().times(1).returning(|_| Ok(()));
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(0),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
         *manager.last_enforced_state.lock().unwrap() = LastState::State(InstanceState::Created);
 
@@ -862,10 +937,11 @@ mod tests {
             mock_lm.expect_startService().times(1).returning(|_| Ok(()));
             let fetcher = MockAllLmManagerWrapper::new(mock_lm);
             let manager = InstanceManager::new(
-                fqin.clone(),
+                fqin.to_lm_fqin(),
                 PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
                 RetryConfiguration::new(0),
                 Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+                Arc::new(Mutex::new(HashMap::new())),
             );
             *manager.last_enforced_state.lock().unwrap() = last_state;
 
@@ -891,10 +967,11 @@ mod tests {
         mock_lm.expect_startService().never();
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            Fqin::new("com.google.sdv.test", "ServiceName", "instance"),
+            Fqin::new("com.google.sdv.test", "ServiceName", "instance").to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
             RetryConfiguration::new(3),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
         // WHEN
         let (responder, receiver) = oneshot::channel();
@@ -922,10 +999,11 @@ mod tests {
 
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(0),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
 
         // Manually add a "create" request to the enforce_queue.
@@ -966,7 +1044,7 @@ mod tests {
 
         // WHEN a cancelled request is sent.
         let result = InstanceManager::orchestrate_transition_internal(
-            &fqin,
+            &fqin.to_lm_fqin(),
             lm_connection,
             InstanceState::Started,
             Arc::new(AtomicBool::new(true)), // The request is cancelled
@@ -988,10 +1066,11 @@ mod tests {
 
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(0), // No retries
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
 
         // Set a last requested state to restart to.
@@ -1017,10 +1096,11 @@ mod tests {
 
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(5), // With retries
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
 
         // Set a last requested state to restart to.
@@ -1044,10 +1124,11 @@ mod tests {
 
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(1), // With retries
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
 
         // Set a last requested state to restart to.
@@ -1071,10 +1152,11 @@ mod tests {
 
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(1), // With retries, to make sure it's not the reason for skipping.
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
 
         // Add a pending NewMode request to the queue.
@@ -1108,10 +1190,11 @@ mod tests {
         let evaluator = sdv_orch_dist_config::evaluator::Evaluator::new(None, &[]);
 
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(1), // With retries, to show it's not the reason for skipping.
             Arc::new(Mutex::new(evaluator)),
+            Arc::new(Mutex::new(HashMap::new())),
         );
 
         // WHEN orchestrate_restart is called with no last requested state.
@@ -1151,10 +1234,11 @@ mod tests {
 
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(5),
             Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
         );
 
         // Start a crash recovery task.
@@ -1206,10 +1290,11 @@ mod tests {
         );
 
         let manager = InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             RetryConfiguration::new(1), // With retries
             Arc::new(Mutex::new(evaluator)),
+            Arc::new(Mutex::new(HashMap::new())),
         );
 
         // WHEN orchestrate_restart is called and last_requested_state is None.
@@ -1218,5 +1303,309 @@ mod tests {
         // THEN the restart is successful because the state is fetched from the config.
         let result = receiver.await.unwrap();
         assert!(result.is_ok());
+    }
+
+    // State reporting tests
+
+    struct MockListenerWrapper {
+        mock: Arc<Mutex<MockIServiceBundleInstanceStateChangeListener>>,
+    }
+
+    impl binder::Interface for MockListenerWrapper {}
+
+    impl IServiceBundleInstanceStateChangeListener for MockListenerWrapper {
+        fn onServiceBundleInstanceStateChanged(
+            &self,
+            fqin: &AidlFqin,
+            recovery_state: ServiceBundleInstanceRecoveryState,
+            lifecycle_state: ServiceBundleInstanceLifecycleState,
+        ) -> BinderResult<()> {
+            self.mock.lock().unwrap().onServiceBundleInstanceStateChanged(
+                fqin,
+                recovery_state,
+                lifecycle_state,
+            )
+        }
+    }
+
+    fn setup_manager_with_mock_listener(
+        mock_lm: MockILifecycleManager,
+        retry_config: RetryConfiguration,
+    ) -> (Arc<InstanceManager>, Arc<Mutex<MockIServiceBundleInstanceStateChangeListener>>, AidlFqin)
+    {
+        let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
+        let fetcher = MockAllLmManagerWrapper::new(mock_lm);
+        let lm_connection = PersistentBinderConnection::new(move || fetcher.get_lm());
+
+        let mock_listener =
+            Arc::new(Mutex::new(MockIServiceBundleInstanceStateChangeListener::new()));
+
+        let listener_wrapper = MockListenerWrapper { mock: mock_listener.clone() };
+        let listener_binder = BnServiceBundleInstanceStateChangeListener::new_binder(
+            listener_wrapper,
+            BinderFeatures::default(),
+        );
+
+        let mut subscribers = HashMap::new();
+        subscribers.insert(0, listener_binder);
+
+        let aidl_fqin = fqin.to_lm_fqin();
+        let manager = InstanceManager::new(
+            aidl_fqin.clone(),
+            lm_connection,
+            retry_config,
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(subscribers)),
+        );
+
+        (manager, mock_listener, aidl_fqin)
+    }
+
+    #[tokio::test]
+    async fn test_successful_start_notifies_operational() {
+        // GIVEN
+        let mut mock_lm = MockILifecycleManager::new();
+        mock_lm.expect_startService().times(1).returning(|_| Ok(()));
+
+        let (manager, mock_listener, service_fqin) =
+            setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(0));
+
+        // THEN
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::OPERATIONAL
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        // THEN the RETRYING is not called as it's not a restart
+        mock_listener.lock().unwrap().expect_onServiceBundleInstanceStateChanged().never();
+
+        // WHEN
+        let (responder, receiver) = oneshot::channel();
+        manager.orchestrate_transition_request(TransitionRequest {
+            cancel: Arc::new(AtomicBool::new(false)),
+            responder: Some(responder),
+            request_type: RequestType::NewMode(InstanceState::Started),
+        });
+
+        // THEN
+        assert!(receiver.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_successful_create_notifies_operational() {
+        // GIVEN
+        let mut mock_lm = MockILifecycleManager::new();
+        mock_lm.expect_launchService().times(1).returning(|_| Ok(()));
+
+        let (manager, mock_listener, service_fqin) =
+            setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(0));
+
+        // THEN
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::OPERATIONAL
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::CREATED
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        // THEN the RETRYING is not called as it's not a restart
+        mock_listener.lock().unwrap().expect_onServiceBundleInstanceStateChanged().never();
+
+        // WHEN
+        let (responder, receiver) = oneshot::channel();
+        manager.orchestrate_transition_request(TransitionRequest {
+            cancel: Arc::new(AtomicBool::new(false)),
+            responder: Some(responder),
+            request_type: RequestType::NewMode(InstanceState::Created),
+        });
+
+        // THEN
+        assert!(receiver.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_successful_destroy_notifies_terminated() {
+        // GIVEN
+        let mut mock_lm = MockILifecycleManager::new();
+        mock_lm.expect_shutdownService().times(1).returning(|_| Ok(()));
+
+        let (manager, mock_listener, service_fqin) =
+            setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(0));
+        *manager.last_enforced_state.lock().unwrap() = LastState::State(InstanceState::Started);
+
+        // THEN
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::OPERATIONAL
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::DESTROYED
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        // THEN the RETRYING is not called as it's not a restart
+        mock_listener.lock().unwrap().expect_onServiceBundleInstanceStateChanged().never();
+
+        // WHEN
+        let (responder, receiver) = oneshot::channel();
+        manager.orchestrate_transition_request(TransitionRequest {
+            cancel: Arc::new(AtomicBool::new(false)),
+            responder: Some(responder),
+            request_type: RequestType::NewMode(InstanceState::Destroyed),
+        });
+
+        // THEN
+        assert!(receiver.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_restart_notifies_retrying() {
+        // GIVEN
+        let mut mock_lm = MockILifecycleManager::new();
+        mock_lm.expect_startService().times(1).returning(|_| Ok(()));
+
+        let (manager, mock_listener, service_fqin) =
+            setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(1));
+        let service_fqin_clone = service_fqin.clone();
+
+        let mut seq = mockall::Sequence::new();
+        // THEN the RETRYING is reported as we are restarting with the expected state
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin_clone
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::RETRYING
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _| Ok(()));
+        // THEN the success restart is reported
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::OPERATIONAL
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _| Ok(()));
+
+        // WHEN
+        // Set a last requested state to restart to.
+        *manager.last_requested_state.lock().unwrap() = Some(InstanceState::Started);
+
+        // Use a channel to know when the restart attempt is complete.
+        let receiver = manager.orchestrate_restart().unwrap();
+
+        // THEN the restart is successful.
+        let result = receiver.await.unwrap();
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_transient_error_notifies_retrying_and_retry_failed() {
+        // GIVEN
+        let mut mock_lm = MockILifecycleManager::new();
+        mock_lm.expect_startService().times(2).returning(|_| {
+            Err(Status::new_service_specific_error(ResponseCode::SERVICE_NOT_FOUND.0, None))
+        });
+
+        let (manager, mock_listener, service_fqin) =
+            setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(1));
+        let service_fqin_clone = service_fqin.clone();
+
+        // THEN
+        let mut seq = mockall::Sequence::new();
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin_clone
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::RETRYING
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _| Ok(()));
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::RETRY_FAILED
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _| Ok(()));
+
+        // WHEN
+        let (responder, receiver) = oneshot::channel();
+        manager.orchestrate_transition_request(TransitionRequest {
+            cancel: Arc::new(AtomicBool::new(false)),
+            responder: Some(responder),
+            request_type: RequestType::NewMode(InstanceState::Started),
+        });
+
+        // THEN
+        assert!(receiver.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_permanent_error_notifies_failed() {
+        // GIVEN
+        let mut mock_lm = MockILifecycleManager::new();
+        mock_lm.expect_startService().times(1).returning(|_| {
+            Err(Status::new_service_specific_error(ResponseCode::PERMISSION_DENIED.0, None))
+        });
+
+        let (manager, mock_listener, service_fqin) =
+            setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(5));
+
+        // THEN the RETRY_FAILED is notified
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::RETRY_FAILED
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        // THEN the RETRYING is never called
+        mock_listener.lock().unwrap().expect_onServiceBundleInstanceStateChanged().never();
+
+        // WHEN
+        let (responder, receiver) = oneshot::channel();
+        manager.orchestrate_transition_request(TransitionRequest {
+            cancel: Arc::new(AtomicBool::new(false)),
+            responder: Some(responder),
+            request_type: RequestType::NewMode(InstanceState::Started),
+        });
+
+        // THEN
+        assert!(receiver.await.unwrap().is_err());
     }
 }

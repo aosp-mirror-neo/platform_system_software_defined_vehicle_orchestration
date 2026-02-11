@@ -66,9 +66,8 @@ impl Agent {
     /// Creates a new orchestrator agent and subscribes for state updates.
     pub async fn new() -> anyhow::Result<Agent> {
         Self::reset_vpm_props();
-        if let Err(e) = ServiceBundleStateReporterService::register_binder_service() {
-            error!("Failed to register bundle state reporter service: {e:?}");
-        }
+        let bundle_updates_subscribers =
+            ServiceBundleStateReporterService::register_binder_service()?;
         let dm: Arc<sdv_dump::DumpManager> =
             DumpBinderConnection::initialize(DUMP_REPORT_TITLE, BINDER_TAG);
         dm.set_agent_state("See orchestrator state below.");
@@ -111,6 +110,7 @@ impl Agent {
             lm_connection.clone(),
             restart_config,
             evaluator.clone(),
+            bundle_updates_subscribers,
         ));
         let orch = Arc::new(OrchestratorEngine::new(
             evaluator,

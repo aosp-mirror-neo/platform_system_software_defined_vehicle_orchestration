@@ -372,6 +372,7 @@ mod tests {
                 PersistentBinderConnection::new(move || mock_lm.get_lm()),
                 restart_config,
                 evaluator.clone(),
+                Arc::new(Mutex::new(HashMap::new())),
             ));
             let orch = OrchestratorEngine::new(
                 evaluator,
@@ -454,6 +455,7 @@ mod tests {
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             Arc::new(HashMap::new()),
             evaluator.clone(),
+            Arc::new(Mutex::new(HashMap::new())),
         ));
         let test_orch = OrchestratorEngine::new(
             evaluator,
@@ -500,6 +502,7 @@ mod tests {
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             Arc::new(HashMap::new()),
             evaluator.clone(),
+            Arc::new(Mutex::new(HashMap::new())),
         ));
         let test_orch = OrchestratorEngine::new(
             evaluator,
@@ -543,6 +546,7 @@ mod tests {
             PersistentBinderConnection::new(move || fetcher.get_lm()),
             Arc::new(HashMap::new()),
             evaluator.clone(),
+            Arc::new(Mutex::new(HashMap::new())),
         ));
         let test_orch = OrchestratorEngine::new(
             evaluator,
@@ -1040,6 +1044,7 @@ mod tests {
                 PersistentBinderConnection::new(move || fetcher.get_lm()),
                 Arc::new(HashMap::new()),
                 evaluator.clone(),
+                Arc::new(Mutex::new(HashMap::new())),
             ));
             let orch = OrchestratorEngine::new(
                 evaluator,
@@ -1084,6 +1089,7 @@ mod tests {
                 PersistentBinderConnection::new(move || fetcher.get_lm()),
                 Arc::new(HashMap::new()),
                 evaluator.clone(),
+                Arc::new(Mutex::new(HashMap::new())),
             ));
             let orch = OrchestratorEngine::new(
                 evaluator,
@@ -1179,6 +1185,7 @@ mod tests {
                 PersistentBinderConnection::new(move || fetcher.get_lm()),
                 Arc::new(HashMap::new()),
                 evaluator.clone(),
+                Arc::new(Mutex::new(HashMap::new())),
             ));
             let orch = OrchestratorEngine::new(
                 evaluator,
@@ -1291,6 +1298,7 @@ mod tests {
             }),
             Arc::new(HashMap::new()),
             evaluator.clone(),
+            Arc::new(Mutex::new(HashMap::new())),
         ));
         OrchestratorEngine::new(
             evaluator,
@@ -1327,6 +1335,7 @@ mod tests {
             }),
             Arc::new(HashMap::new()),
             evaluator.clone(),
+            Arc::new(Mutex::new(HashMap::new())),
         ));
         OrchestratorEngine::new(
             evaluator,
@@ -1359,6 +1368,7 @@ mod tests {
             }),
             Arc::new(HashMap::new()),
             evaluator.clone(),
+            Arc::new(Mutex::new(HashMap::new())),
         ));
         let engine = OrchestratorEngine::new(
             evaluator,

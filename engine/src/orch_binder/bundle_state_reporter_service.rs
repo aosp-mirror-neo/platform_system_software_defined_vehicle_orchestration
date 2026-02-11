@@ -36,11 +36,14 @@ pub(crate) struct ServiceBundleStateReporterService {
 }
 
 impl ServiceBundleStateReporterService {
-    pub fn register_binder_service() -> SdvResult<()> {
+    pub fn register_binder_service(
+    ) -> SdvResult<Arc<Mutex<HashMap<u32, Strong<dyn IServiceBundleInstanceStateChangeListener>>>>>
+    {
         let descriptor =
             <BpOrchestrationAgent as IOrchestrationAgent>::get_descriptor().to_owned() + "/default";
 
         let sb_state_reporter_service = ServiceBundleStateReporterService::default();
+        let subscribers = sb_state_reporter_service.bundle_updates_subscribers.clone();
         let sb_state_reporter_service_binder =
             BnOrchestrationAgent::new_binder(sb_state_reporter_service, BinderFeatures::default());
         info!("Registering service bundle state reporter binder service {descriptor}");
@@ -52,7 +55,8 @@ impl ServiceBundleStateReporterService {
                     "Failed to register service bundle state reporter binder service",
                 )
             },
-        )
+        )?;
+        Ok(subscribers)
     }
 }
 
@@ -63,8 +67,6 @@ impl IOrchestrationAgent for ServiceBundleStateReporterService {
         &self,
         listener: &Strong<dyn IServiceBundleInstanceStateChangeListener>,
     ) -> BinderResult<()> {
-        // TODO(b/437890290): Implement state reporting logic
-
         let caller_uid = ThreadState::get_calling_uid();
         let previous_subscribers =
             self.bundle_updates_subscribers.lock().unwrap().insert(caller_uid, listener.clone());
@@ -99,8 +101,8 @@ mod tests {
     fn test_registration_and_unregistration_to_bundle_updates_binder_succeeds() {
         // GIVEN
         // Register the service so we can connect to it
-        ServiceBundleStateReporterService::register_binder_service()
-            .expect("Failed to register ServiceBundleStateReporterService service");
+        let registration_result = ServiceBundleStateReporterService::register_binder_service();
+        assert!(registration_result.is_ok());
         let descriptor =
             <BpOrchestrationAgent as IOrchestrationAgent>::get_descriptor().to_owned() + "/default";
 
