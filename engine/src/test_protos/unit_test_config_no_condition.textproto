@@ -17,7 +17,7 @@
 service_bundle_config {
   instance: "sample_instance_no_conditions"
   service_bundle_name: "sample_service_name_no_conditions"
-  package_name: "com.google.sdv.samples"
+  package_name: "com.android.sdv.samples"
 
   state {
     instances_states { started: "sample_instance_no_conditions" }

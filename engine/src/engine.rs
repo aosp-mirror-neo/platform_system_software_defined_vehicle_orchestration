@@ -724,7 +724,7 @@ mod tests {
     #[tokio::test]
     async fn test_on_state_update_should_start_required_services() {
         // GIVEN
-        let fqin = Fqin::new("com.google.sdv.samples", "sample_service_name", "sample_instance");
+        let fqin = Fqin::new("com.android.sdv.samples", "sample_service_name", "sample_instance");
         let config = Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[]);
         let test_context = TestContext::new_with_config(LMInterceptor::default(), config);
         // WHEN
@@ -739,7 +739,7 @@ mod tests {
     #[tokio::test]
     async fn test_on_state_update_should_destroy_obsolete_services() {
         // GIVEN
-        let fqin = Fqin::new("com.google.sdv.samples", "sample_service_name", "sample_instance");
+        let fqin = Fqin::new("com.android.sdv.samples", "sample_service_name", "sample_instance");
         let config = Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[]);
         let test_context = TestContext::new_with_config(LMInterceptor::default(), config);
         // Start test service
@@ -770,7 +770,7 @@ mod tests {
     #[tokio::test]
     async fn test_on_cancel_it_should_not_process_any_services() {
         // GIVEN
-        let fqin = Fqin::new("com.google.sdv.samples", "sample_service_name", "sample_instance");
+        let fqin = Fqin::new("com.android.sdv.samples", "sample_service_name", "sample_instance");
         let config = Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[]);
         let test_context = TestContext::new_with_config(LMInterceptor::default(), config);
         // Start test service
@@ -791,7 +791,7 @@ mod tests {
     #[tokio::test]
     async fn test_on_cancel_it_should_update_orch_config() {
         // GIVEN
-        let fqin = Fqin::new("com.google.sdv.samples", "sample_service_name", "sample_instance");
+        let fqin = Fqin::new("com.android.sdv.samples", "sample_service_name", "sample_instance");
         let config = Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[]);
         let test_context = TestContext::new_with_config(LMInterceptor::default(), config);
         // WHEN
@@ -815,7 +815,7 @@ mod tests {
         // GIVEN
         let timestamp_older = Some(Timestamp { seconds: 10, nanos: 0, ..Timestamp::new() });
         let timestamp_newer = Some(Timestamp { seconds: 15, nanos: 0, ..Timestamp::new() });
-        let fqin = Fqin::new("com.google.sdv.samples", "sample_service_name", "sample_instance");
+        let fqin = Fqin::new("com.android.sdv.samples", "sample_service_name", "sample_instance");
         let config = Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[]);
         let test_context = TestContext::new_with_config(LMInterceptor::default(), config);
         // WHEN
@@ -850,7 +850,7 @@ mod tests {
     #[tokio::test]
     async fn test_on_incorrect_update_event_type_it_should_not_process_any_updates() {
         // GIVEN
-        let fqin = Fqin::new("com.google.sdv.samples", "sample_service_name", "sample_instance");
+        let fqin = Fqin::new("com.android.sdv.samples", "sample_service_name", "sample_instance");
         let config = Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[]);
         let test_context = TestContext::new_with_config(LMInterceptor::default(), config);
         // Set a state first so it is not started on the recovery
@@ -933,7 +933,7 @@ mod tests {
     async fn test_on_default_update_should_launch_services_with_no_condition() {
         // GIVEN / WHEN
         let fqin = Fqin::new(
-            "com.google.sdv.samples",
+            "com.android.sdv.samples",
             "sample_service_name_no_conditions",
             "sample_instance_no_conditions",
         );
@@ -950,7 +950,7 @@ mod tests {
     #[tokio::test]
     async fn test_on_default_cancelled_it_should_not_process_any_updates() {
         // GIVEN
-        let fqin = Fqin::new("com.google.sdv.samples", "sample_service_name", "sample_instance");
+        let fqin = Fqin::new("com.android.sdv.samples", "sample_service_name", "sample_instance");
         let config = Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[]);
         let test_context = TestContext::new_with_config(LMInterceptor::default(), config);
         // Set a state first so it is not started on the recovery
@@ -974,7 +974,7 @@ mod tests {
     #[tokio::test]
     async fn test_on_recovery_update_should_start_required_services() {
         // GIVEN
-        let fqin = Fqin::new("com.google.sdv.samples", "sample_service_name", "sample_instance");
+        let fqin = Fqin::new("com.android.sdv.samples", "sample_service_name", "sample_instance");
         let config = Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[]);
         let test_context = TestContext::new_with_config(LMInterceptor::default(), config);
         // Set a state first so it is started on the recovery
@@ -996,7 +996,7 @@ mod tests {
     #[tokio::test]
     async fn test_on_recovery_cancelled_it_should_not_process_any_updates() {
         // GIVEN
-        let fqin = Fqin::new("com.google.sdv.samples", "sample_service_name", "sample_instance");
+        let fqin = Fqin::new("com.android.sdv.samples", "sample_service_name", "sample_instance");
         let config = Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[]);
         let test_context = TestContext::new_with_config(LMInterceptor::default(), config);
         // Set a state first so it is not started on the recovery

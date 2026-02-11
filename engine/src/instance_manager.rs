@@ -1188,7 +1188,7 @@ mod tests {
     #[tokio::test]
     async fn test_orchestrate_restart_from_config() {
         // GIVEN
-        let fqin = Fqin::new("com.google.sdv.samples", "sample_service_name", "sample_instance");
+        let fqin = Fqin::new("com.android.sdv.samples", "sample_service_name", "sample_instance");
         let mut mock_lm = MockILifecycleManager::new();
         mock_lm.expect_startService().times(1).returning(|_| Ok(()));
 

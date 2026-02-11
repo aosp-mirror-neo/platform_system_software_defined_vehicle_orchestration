@@ -17,7 +17,7 @@
 service_bundle_config {
   instance: "sample_instance"
   service_bundle_name: "sample_service_name"
-  package_name: "com.google.sdv.samples"
+  package_name: "com.android.sdv.samples"
 
   state {
     condition { power_state: "ON" }
