@@ -15,19 +15,19 @@
  */
 //! Handles the internal orchestrator logic, starting and stopping services on VPM updates.
 
-use crate::instance_manager::InstanceManager;
+use crate::instance_manager_factory::IInstanceManagerFactory;
+use crate::instance_manager::{IInstanceManager, RequestType};
 use crate::StatesUpdateHandler;
+use crate::instance_manager::TransitionRequest;
 use futures::future;
 use futures::{FutureExt, StreamExt};
-use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ILifecycleManager::ILifecycleManager;
 use google_sdv_lifecycle_manager::binder;
-use log::{debug, error, info, warn};
 use persistent_binder::BinderConnectionManager;
+use log::{debug, error, info, warn};
 use protobuf::well_known_types::timestamp::Timestamp;
 use rustutils::android::system_properties::read;
 use rustutils::android::system_properties;
 use sdv_dump::DumpStateReporter;
-use sdv_orchestration_common::retry_configuration::RetryConfiguration;
 use sdv_orch_dist_config::evaluator::Evaluator;
 use sdv_orchestration_common::fqin::Fqin;
 use google_sdv_identity::aidl::google::sdv::identity::ServiceFqin::ServiceFqin;
@@ -35,14 +35,17 @@ use sdv_orchestration_common::instance_state::InstanceState;
 use sdv_orchestration_common::mode::{Mode, UpdateEvent};
 use std::collections::HashMap;
 use binder::BinderFeatures;
+use async_trait::async_trait;
+use binder_tokio::TokioRuntime;
+use google_sdv_lifecycle_crash_notification_aidl::aidl::google::sdv::lifecycle::internal::crash_notification::IServiceBundleCrashNotificationCallback::{BnServiceBundleCrashNotificationCallback, IServiceBundleCrashNotificationCallbackAsyncServer};
+use google_sdv_lifecycle_crash_notification_aidl::aidl::google::sdv::lifecycle::internal::crash_notification::IServiceBundleCrashNotificationService::IServiceBundleCrashNotificationService;
 use std::io::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
-use google_sdv_lifecycle_crash_notification_aidl::aidl::google::sdv::lifecycle::internal::crash_notification::IServiceBundleCrashNotificationService::IServiceBundleCrashNotificationService;
-use google_sdv_lifecycle_crash_notification_aidl::aidl::google::sdv::lifecycle::internal::crash_notification::IServiceBundleCrashNotificationCallback::{IServiceBundleCrashNotificationCallback, BnServiceBundleCrashNotificationCallback};
 use std::sync::Mutex;
 use tracing::instrument;
+use tokio::runtime::Handle;
 
 static LM_CALLS_MAX_THREAD_LIMIT: LazyLock<usize> =
     LazyLock::new(|| read_lm_binder_max_parallelism_sys_prop_or_default(read));
@@ -89,12 +92,10 @@ fn set_orchestrator_ready_prop() {
 /// Internal orch functionality
 pub struct OrchestratorEngine {
     config: Arc<Mutex<Evaluator>>,
-    current_instances_states: Arc<Mutex<HashMap<Fqin, InstanceState>>>,
     dump_state: Arc<Mutex<Option<String>>>,
-    lm_connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,
-    restart_config: Arc<HashMap<Fqin, RetryConfiguration>>,
+    instance_manager_factory: Arc<dyn IInstanceManagerFactory>,
     // Avoids creating a new instance manager for already enforced bundles
-    enforcing_bundles: Arc<Mutex<HashMap<Fqin, Arc<InstanceManager>>>>,
+    enforcing_bundles: Arc<Mutex<HashMap<Fqin, Arc<dyn IInstanceManager>>>>,
 }
 
 impl DumpStateReporter for OrchestratorEngine {
@@ -108,12 +109,29 @@ impl DumpStateReporter for OrchestratorEngine {
 impl binder::Interface for OrchestratorEngine {}
 
 #[allow(non_snake_case)]
-impl IServiceBundleCrashNotificationCallback for OrchestratorEngine {
-    fn onServiceBundleCrash(&self, fqin: &ServiceFqin) -> binder::Result<()> {
+#[async_trait]
+impl IServiceBundleCrashNotificationCallbackAsyncServer for OrchestratorEngine {
+    async fn onServiceBundleCrash(&self, fqin: &ServiceFqin) -> binder::Result<()> {
         // Do not change this log as it's used in the SdvE2EOrchestrationBundleRestartedAfterCrashNotificationTest e2e test
         // to verify that the LM crash notification binder API works as expected.
         info!("Service bundle crashed for fqin: {fqin:?}");
-        // TODO(b/419239856): add bundle restart logic here.
+
+        let instance = Fqin::from_lm_fqin(fqin);
+        let instance_manager = {
+            let mut binding = self.enforcing_bundles.lock().unwrap();
+            binding
+                .entry(instance.clone())
+                .or_insert_with(|| self.instance_manager_factory.create(&instance))
+                .clone()
+        };
+        // If the bundle has crashed, the state we have assigned previously is not valid anymore.
+        instance_manager.invalidate_state();
+        if !instance_manager.is_restartable() {
+            // Log is used in e2e tests. Please do not change, or update e2e tests if necessary.
+            warn!("Bundle with {:?} has crashed, but it is not restartable.", instance);
+            return Ok(());
+        }
+        instance_manager.orchestrate_restart();
         Ok(())
     }
 }
@@ -122,37 +140,34 @@ impl OrchestratorEngine {
     /// Creates a new orchestrator engine that starts and stops service bundles.
     /// Configured service bundles with no conditions attached will be queued to start at this point.
     pub fn new(
-        config: Evaluator,
+        config: Arc<Mutex<Evaluator>>,
         dump_state: Arc<Mutex<Option<String>>>,
-        lm_connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,
+        instance_manager_factory: Arc<dyn IInstanceManagerFactory>,
         crash_notifier_connection: Arc<
             dyn BinderConnectionManager<dyn IServiceBundleCrashNotificationService>,
         >,
     ) -> Self {
-        let restart_config = Arc::new(config.get_retry_configuration());
         let engine = Self {
-            config: Arc::new(Mutex::new(config)),
-            current_instances_states: Arc::new(Mutex::new(HashMap::new())),
-            lm_connection,
+            config,
             dump_state,
-            restart_config,
+            instance_manager_factory,
             enforcing_bundles: Arc::new(Mutex::new(HashMap::new())),
         };
+        // We need to get the tokio handle to recreate the crash notification connection
+        // in `subscribe_to_crash_notification`.
+        // Otherwise it's called from a binder thread (on death) instead of tokio one, and panics.
+        let tokio_handle = Handle::current();
         let engine_clone = engine.clone();
         crash_notifier_connection.set_reconnect_listener(Box::new(move |binder| {
             debug!("LM Crash Notifier binder has died, connecting and subscribing again.");
-            subscribe_to_crash_notification(engine_clone.clone(), binder);
+            subscribe_to_crash_notification(engine_clone.clone(), binder, tokio_handle.clone());
         }));
         subscribe_to_crash_notification(
             engine.clone(),
             &crash_notifier_connection.get_binder().lock().unwrap(),
+            Handle::current(),
         );
         engine
-    }
-
-    #[cfg(test)]
-    pub fn get_lm_connection(&self) -> Arc<dyn BinderConnectionManager<dyn ILifecycleManager>> {
-        self.lm_connection.clone()
     }
 
     #[instrument(skip(self, cancellation), ret)]
@@ -162,53 +177,40 @@ impl OrchestratorEngine {
         mut instances_states: HashMap<Fqin, InstanceState>,
         cancellation: Arc<AtomicBool>,
     ) -> bool {
-        let current_instances_states = self.current_instances_states.lock().unwrap().clone();
-
         // Ensure that obsolete services are destroyed.
-        for (instance, _) in current_instances_states {
-            instances_states.entry(instance).or_insert(InstanceState::Destroyed);
-        }
+        self.enforcing_bundles.lock().unwrap().iter().for_each(|(fqin, instance)| {
+            if !instances_states.contains_key(fqin) && instance.is_created_or_started() {
+                instances_states.insert(fqin.clone(), InstanceState::Destroyed);
+            }
+        });
 
         futures::stream::iter(instances_states)
             // Stop processing if cancellation is requested
             .take_while(|_| future::ready(!cancellation.load(Ordering::Relaxed)))
             // Process each instance state concurrently
             .for_each_concurrent(*LM_CALLS_MAX_THREAD_LIMIT, |(instance, state)| {
-                let lm_connection_clone = self.lm_connection.clone();
-                let current_instances_states_clone = self.current_instances_states.clone();
-                let restart_config_clone: Arc<HashMap<Fqin, RetryConfiguration>> =
-                    Arc::clone(&self.restart_config);
                 let enforcing_bundles = self.enforcing_bundles.clone();
                 let lm_cancel_clone = cancellation.clone();
+                let instance_manager_factory = self.instance_manager_factory.clone();
                 tokio::task::spawn_blocking(move || {
                     let instance_manager = {
                         let mut binding = enforcing_bundles.lock().unwrap();
                         binding
                             .entry(instance.clone())
-                            .or_insert(Arc::new(InstanceManager::new(
-                                instance.clone(),
-                                lm_connection_clone,
-                                *restart_config_clone
-                                    .get(&instance.clone())
-                                    .unwrap_or(&RetryConfiguration::new(0)),
-                            )))
+                            .or_insert_with(|| instance_manager_factory.create(&instance))
                             .clone()
                     };
-                    if instance_manager
-                        .orchestrate_transition(state.clone(), lm_cancel_clone)
-                        .is_ok()
-                    {
-                        if state == InstanceState::Destroyed {
-                            current_instances_states_clone
-                                .lock()
-                                .unwrap()
-                                .remove(&instance.clone());
-                        } else {
-                            current_instances_states_clone
-                                .lock()
-                                .unwrap()
-                                .insert(instance.clone(), state.clone());
-                        }
+                    let (responder, receiver) = tokio::sync::oneshot::channel();
+                    let request = TransitionRequest {
+                        cancel: lm_cancel_clone,
+                        responder: Some(responder),
+                        request_type: RequestType::NewMode(state.clone()),
+                    };
+                    instance_manager.orchestrate_transition_request(request);
+                    if receiver.blocking_recv().is_ok() {
+                        info!("Finished transitioning {:?} to {:?}.", instance, state);
+                    } else {
+                        warn!("Failed to transition {:?} to {:?}.", instance, state);
                     }
                 })
                 .map(|result| result.unwrap_or_default())
@@ -224,9 +226,13 @@ impl OrchestratorEngine {
 pub fn subscribe_to_crash_notification(
     engine: OrchestratorEngine,
     crash_binder: &binder::Strong<dyn IServiceBundleCrashNotificationService>,
+    tokio_handle: Handle,
 ) {
-    let crash_callback =
-        BnServiceBundleCrashNotificationCallback::new_binder(engine, BinderFeatures::default());
+    let crash_callback = BnServiceBundleCrashNotificationCallback::new_async_binder(
+        engine,
+        TokioRuntime(tokio_handle),
+        BinderFeatures::default(),
+    );
     let res = crash_binder.subscribe(&crash_callback);
     if let Err(ref err) = res {
         warn!("Failed to subscribe to crash notifications with error: {:?}", err);
@@ -284,6 +290,12 @@ impl StatesUpdateHandler for OrchestratorEngine {
             return;
         }
 
+        if *event == UpdateEvent::Recovery {
+            self.enforcing_bundles.lock().unwrap().iter().for_each(|(_, instance)| {
+                instance.invalidate_state();
+            });
+        }
+
         let state = event.to_string();
         *self.dump_state.lock().unwrap() = Some(state.clone());
 
@@ -309,8 +321,11 @@ impl StatesUpdateHandler for OrchestratorEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instance_manager_factory::InstanceManagerFactory;
+    use crate::instance_manager::MockIInstanceManager;
     use crate::LifecycleManagerFetcher;
     use crate::OrchestratorEngine;
+    use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ILifecycleManager::ILifecycleManager;
     use binder::Status;
     use googletest::{
         assert_that,
@@ -321,10 +336,11 @@ mod tests {
     use sdv_orch_test_mocks::dumpsys_lm_mocks::*;
     use sdv_orch_test_mocks::mock_lm_with_interceptor::*;
     use sdv_orch_test_mocks::parallelization_lm_mock::*;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::Mutex;
     use google_sdv_lifecycle_crash_notification_aidl::aidl::google::sdv::lifecycle::internal::crash_notification::IServiceBundleCrashNotificationService::{MockIServiceBundleCrashNotificationService, BnServiceBundleCrashNotificationService};
+    use crate::instance_manager_factory::IInstanceManagerFactory;
+    use crate::instance_manager_factory::MockIInstanceManagerFactory;
     use tokio::sync::broadcast;
 
     static TEST_PROTO_PATH: &str = "src/test_protos/unit_test_config_sample.textproto";
@@ -350,10 +366,17 @@ mod tests {
         fn new_with_config(lm: LMInterceptor, config: Evaluator) -> Self {
             let lm_interceptor = Arc::new(lm);
             let mock_lm = MockLifecycleManager::create(lm_interceptor.clone());
-            let orch = OrchestratorEngine::new(
-                config,
-                Arc::new(Mutex::new(None)),
+            let restart_config = Arc::new(config.get_retry_configuration());
+            let evaluator = Arc::new(Mutex::new(config));
+            let factory: Arc<dyn IInstanceManagerFactory> = Arc::new(InstanceManagerFactory::new(
                 PersistentBinderConnection::new(move || mock_lm.get_lm()),
+                restart_config,
+                evaluator.clone(),
+            ));
+            let orch = OrchestratorEngine::new(
+                evaluator,
+                Arc::new(Mutex::new(None)),
+                factory,
                 get_mock_crash_notifier_persistent_connection(),
             );
             Self { lm_interceptor, orch }
@@ -423,7 +446,48 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
     async fn test_parallel_transitions_to_destroyed() {
-        test_parallel_transitions(InstanceState::Destroyed).await;
+        // GIVEN
+        let mock_lm = Arc::new(ParallelizationLmMock::default());
+        let fetcher = ParallelizationLmFetcher { lm: mock_lm.clone() };
+        let evaluator = Arc::new(Mutex::new(Evaluator::new(None, &[])));
+        let factory = Arc::new(InstanceManagerFactory::new(
+            PersistentBinderConnection::new(move || fetcher.get_lm()),
+            Arc::new(HashMap::new()),
+            evaluator.clone(),
+        ));
+        let test_orch = OrchestratorEngine::new(
+            evaluator,
+            Arc::new(Mutex::new(None)),
+            factory,
+            get_mock_crash_notifier_persistent_connection(),
+        );
+        // First we start the instances so we can destroy them after
+        let mut new_states = HashMap::new();
+        for fqin in (1..64_u8)
+            .map(|i| Fqin::new(&format!("com.google.sdv.test{i}"), "ServiceName", "instance"))
+        {
+            new_states.insert(fqin.clone(), InstanceState::Started);
+        }
+        test_orch.enforce_instances_states(new_states, Arc::new(AtomicBool::new(false))).await;
+
+        // Prepare the instances to be destroyed
+        let mut new_states = HashMap::new();
+        for fqin in (1..64_u8)
+            .map(|i| Fqin::new(&format!("com.google.sdv.test{i}"), "ServiceName", "instance"))
+        {
+            new_states.insert(fqin.clone(), InstanceState::Destroyed);
+        }
+
+        // WHEN
+        test_orch.enforce_instances_states(new_states, Arc::new(AtomicBool::new(false))).await;
+
+        // THEN
+        // With given test payload we should achieve maximum of 8 transactions in
+        // parallel at some point in time.
+        assert_that!(mock_lm.max_pending_transactions.load(Ordering::Relaxed), eq(12));
+
+        // sanity checks: all pending transactions should be finished
+        assert_that!(mock_lm.pending_transactions.load(Ordering::Relaxed), eq(0));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 12)]
@@ -431,10 +495,16 @@ mod tests {
         // GIVEN
         let mock_lm = Arc::new(FailingParallelizationLmMock::default());
         let fetcher = FailingParallelizationLmFetcher { lm: mock_lm.clone() };
-        let test_orch = OrchestratorEngine::new(
-            Evaluator::new(None, &[]),
-            Arc::new(Mutex::new(None)),
+        let evaluator = Arc::new(Mutex::new(Evaluator::new(None, &[])));
+        let factory = Arc::new(InstanceManagerFactory::new(
             PersistentBinderConnection::new(move || fetcher.get_lm()),
+            Arc::new(HashMap::new()),
+            evaluator.clone(),
+        ));
+        let test_orch = OrchestratorEngine::new(
+            evaluator,
+            Arc::new(Mutex::new(None)),
+            factory,
             get_mock_crash_notifier_persistent_connection(),
         );
 
@@ -468,10 +538,16 @@ mod tests {
         // GIVEN
         let mock_lm = Arc::new(ParallelizationLmMock::default());
         let fetcher = ParallelizationLmFetcher { lm: mock_lm.clone() };
-        let test_orch = OrchestratorEngine::new(
-            Evaluator::new(None, &[]),
-            Arc::new(Mutex::new(None)),
+        let evaluator = Arc::new(Mutex::new(Evaluator::new(None, &[])));
+        let factory = Arc::new(InstanceManagerFactory::new(
             PersistentBinderConnection::new(move || fetcher.get_lm()),
+            Arc::new(HashMap::new()),
+            evaluator.clone(),
+        ));
+        let test_orch = OrchestratorEngine::new(
+            evaluator,
+            Arc::new(Mutex::new(None)),
+            factory,
             get_mock_crash_notifier_persistent_connection(),
         );
 
@@ -535,7 +611,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_transition_to_destroyed() {
+    async fn test_transition_from_destroyed_to_destroyed() {
         // GIVEN
         let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
         let test_context = TestContext::new(LMInterceptor::default());
@@ -543,6 +619,32 @@ mod tests {
         new_states.insert(fqin.clone(), InstanceState::Destroyed);
 
         // WHEN
+        test_context
+            .orch
+            .enforce_instances_states(new_states, Arc::new(AtomicBool::new(false)))
+            .await;
+
+        // THEN
+        test_context.assert_lm_calls(&fqin, vec![LMCall::Shutdown]);
+        // We don't remove the instance manager when destroying
+        assert_that!(test_context.orch.enforcing_bundles.lock().unwrap().len(), eq(1));
+    }
+
+    #[tokio::test]
+    async fn test_transition_to_destroyed() {
+        // GIVEN
+        let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
+        let test_context = TestContext::new(LMInterceptor::default());
+        let mut new_states = HashMap::new();
+        // We need to start first the service to destroy it after
+        new_states.insert(fqin.clone(), InstanceState::Started);
+        test_context
+            .orch
+            .enforce_instances_states(new_states.clone(), Arc::new(AtomicBool::new(false)))
+            .await;
+        test_context.lm_interceptor.reset_calls();
+        // WHEN
+        new_states.insert(fqin.clone(), InstanceState::Destroyed);
         test_context
             .orch
             .enforce_instances_states(new_states, Arc::new(AtomicBool::new(false)))
@@ -770,6 +872,61 @@ mod tests {
         test_context.assert_lm_calls(&fqin, vec![]);
     }
 
+    #[tokio::test]
+    async fn test_on_recovery_event_should_invalidate_instance_states() {
+        // GIVEN
+        let config = Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[]);
+
+        let mut mock_im = MockIInstanceManager::new();
+        // We expect `invalidate_state` to be called exactly once.
+        mock_im.expect_invalidate_state().times(1).return_const(());
+        // We need to mock `is_created_or_started` as it's called when destroying obsolete services.
+        mock_im.expect_is_created_or_started().returning(|| true);
+        // We need to mock `orchestrate_transition_request` as it's called to enforce the new state.
+        mock_im.expect_orchestrate_transition_request().return_const(());
+        let mock_im = Arc::new(mock_im);
+
+        let mut factory = MockIInstanceManagerFactory::new();
+        factory.expect_create().returning(move |_| mock_im.clone());
+        let orch = OrchestratorEngine::new(
+            Arc::new(Mutex::new(config)),
+            Arc::new(Mutex::new(None)),
+            Arc::new(factory),
+            get_mock_crash_notifier_persistent_connection(),
+        );
+
+        // Enforce an initial state to populate `enforcing_bundles`.
+        orch.on_state_update(&Mode::Power, "ON", Arc::new(AtomicBool::new(false)), &None).await;
+
+        // WHEN a recovery event occurs.
+        orch.on_event_update(&UpdateEvent::Recovery, Arc::new(AtomicBool::new(false))).await;
+    }
+
+    #[tokio::test]
+    async fn test_on_default_event_should_not_invalidate_instance_states() {
+        // GIVEN
+        let config = Evaluator::new(Some(String::from(TEST_PROTO_NO_CONDITION_PATH)), &[]);
+
+        let mut mock_im = MockIInstanceManager::new();
+        // We expect `invalidate_state` to never be called.
+        mock_im.expect_invalidate_state().never();
+        mock_im.expect_is_created_or_started().returning(|| false);
+        mock_im.expect_orchestrate_transition_request().return_const(());
+        let mock_im = Arc::new(mock_im);
+
+        let mut factory = MockIInstanceManagerFactory::new();
+        factory.expect_create().returning(move |_| mock_im.clone());
+        let orch = OrchestratorEngine::new(
+            Arc::new(Mutex::new(config)),
+            Arc::new(Mutex::new(None)),
+            Arc::new(factory),
+            get_mock_crash_notifier_persistent_connection(),
+        );
+
+        // WHEN a default event occurs.
+        orch.on_event_update(&UpdateEvent::Default, Arc::new(AtomicBool::new(false))).await;
+    }
+
     // On default state test
 
     #[tokio::test]
@@ -875,11 +1032,19 @@ mod tests {
         let dump_state_clone = dump_state.clone();
         // WHEN
         tokio::spawn(async move {
-            let orch = OrchestratorEngine::new(
-                // We need the TEST_PROTO_NO_CONDITION_PATH as there's a service configured to start with no conditions in that proto
-                Evaluator::new(Some(String::from(TEST_PROTO_NO_CONDITION_PATH)), &[]),
-                dump_state_clone,
+            let evaluator = Arc::new(Mutex::new(Evaluator::new(
+                Some(String::from(TEST_PROTO_NO_CONDITION_PATH)),
+                &[],
+            )));
+            let factory = Arc::new(InstanceManagerFactory::new(
                 PersistentBinderConnection::new(move || fetcher.get_lm()),
+                Arc::new(HashMap::new()),
+                evaluator.clone(),
+            ));
+            let orch = OrchestratorEngine::new(
+                evaluator,
+                dump_state_clone,
+                factory,
                 get_mock_crash_notifier_persistent_connection(),
             );
             orch.on_event_update(&UpdateEvent::Default, Arc::new(AtomicBool::new(false))).await;
@@ -911,11 +1076,19 @@ mod tests {
         let dump_state_clone = dump_state.clone();
         // WHEN
         tokio::spawn(async move {
-            let orch = OrchestratorEngine::new(
-                // We need the TEST_PROTO_NO_CONDITION_PATH as there's a service configured to start with no conditions in that proto
-                Evaluator::new(Some(String::from(TEST_PROTO_NO_CONDITION_PATH)), &[]),
-                dump_state_clone,
+            let evaluator = Arc::new(Mutex::new(Evaluator::new(
+                Some(String::from(TEST_PROTO_NO_CONDITION_PATH)),
+                &[],
+            )));
+            let factory = Arc::new(InstanceManagerFactory::new(
                 PersistentBinderConnection::new(move || fetcher.get_lm()),
+                Arc::new(HashMap::new()),
+                evaluator.clone(),
+            ));
+            let orch = OrchestratorEngine::new(
+                evaluator,
+                dump_state_clone,
+                factory,
                 get_mock_crash_notifier_persistent_connection(),
             );
             orch.on_event_update(&UpdateEvent::Recovery, Arc::new(AtomicBool::new(false))).await;
@@ -1000,10 +1173,17 @@ mod tests {
         let dump_state_clone = dump_state.clone();
         // WHEN
         tokio::spawn(async move {
-            let orch = OrchestratorEngine::new(
-                Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[]),
-                dump_state_clone,
+            let evaluator =
+                Arc::new(Mutex::new(Evaluator::new(Some(String::from(TEST_PROTO_PATH)), &[])));
+            let factory = Arc::new(InstanceManagerFactory::new(
                 PersistentBinderConnection::new(move || fetcher.get_lm()),
+                Arc::new(HashMap::new()),
+                evaluator.clone(),
+            ));
+            let orch = OrchestratorEngine::new(
+                evaluator,
+                dump_state_clone,
+                factory,
                 get_mock_crash_notifier_persistent_connection(),
             );
             orch.on_state_update(&Mode::Power, "ON", Arc::new(AtomicBool::new(false)), &None).await;
@@ -1104,13 +1284,18 @@ mod tests {
             listener(&crash_binder);
         });
         // WHEN creating the engine, we should subscribe for crash notification for the 1st time
-        OrchestratorEngine::new(
-            Evaluator::new(None, &[]),
-            Arc::new(Mutex::new(None)),
+        let evaluator = Arc::new(Mutex::new(Evaluator::new(None, &[])));
+        let factory = Arc::new(InstanceManagerFactory::new(
             PersistentBinderConnection::new(move || {
-                let mock_lm = MockLifecycleManager::create(Arc::new(LMInterceptor::default()));
-                mock_lm.get_lm()
+                MockLifecycleManager::create(Arc::new(LMInterceptor::default())).get_lm()
             }),
+            Arc::new(HashMap::new()),
+            evaluator.clone(),
+        ));
+        OrchestratorEngine::new(
+            evaluator,
+            Arc::new(Mutex::new(None)),
+            factory,
             Arc::new(mock_crash_notifier_binder),
         );
     }
@@ -1135,13 +1320,18 @@ mod tests {
             ),
         )));
         // THEN engine should not panic
-        OrchestratorEngine::new(
-            Evaluator::new(None, &[]),
-            Arc::new(Mutex::new(None)),
+        let evaluator = Arc::new(Mutex::new(Evaluator::new(None, &[])));
+        let factory = Arc::new(InstanceManagerFactory::new(
             PersistentBinderConnection::new(move || {
-                let mock_lm = MockLifecycleManager::create(Arc::new(LMInterceptor::default()));
-                mock_lm.get_lm()
+                MockLifecycleManager::create(Arc::new(LMInterceptor::default())).get_lm()
             }),
+            Arc::new(HashMap::new()),
+            evaluator.clone(),
+        ));
+        OrchestratorEngine::new(
+            evaluator,
+            Arc::new(Mutex::new(None)),
+            factory,
             Arc::new(mock_crash_notifier_binder),
         );
     }
@@ -1162,23 +1352,59 @@ mod tests {
             ),
         )));
         mock_crash_notifier_binder.expect_set_reconnect_listener().returning(|_| ());
-        let engine = OrchestratorEngine::new(
-            Evaluator::new(None, &[]),
-            Arc::new(Mutex::new(None)),
+        let evaluator = Arc::new(Mutex::new(Evaluator::new(None, &[])));
+        let factory = Arc::new(InstanceManagerFactory::new(
             PersistentBinderConnection::new(move || {
-                let mock_lm = MockLifecycleManager::create(Arc::new(LMInterceptor::default()));
-                mock_lm.get_lm()
+                MockLifecycleManager::create(Arc::new(LMInterceptor::default())).get_lm()
             }),
+            Arc::new(HashMap::new()),
+            evaluator.clone(),
+        ));
+        let engine = OrchestratorEngine::new(
+            evaluator,
+            Arc::new(Mutex::new(None)),
+            factory,
             Arc::new(mock_crash_notifier_binder),
         );
         // WHEN
-        let res = engine.onServiceBundleCrash(&ServiceFqin {
-            sdvVmName: "local-vm".to_owned(),
-            sdvPackageName: "com.google.sdv.test".to_owned(),
-            serviceBundleName: "BundleName".to_owned(),
-            serviceInstanceName: "InstanceName".to_owned(),
-        });
+        let res = engine
+            .onServiceBundleCrash(&ServiceFqin {
+                sdvVmName: "local-vm".to_owned(),
+                sdvPackageName: "com.google.sdv.test".to_owned(),
+                serviceBundleName: "BundleName".to_owned(),
+                serviceInstanceName: "InstanceName".to_owned(),
+            })
+            .await;
         // TODO(b/419239856): extend with expected crash functionality
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_on_crash_notification_invalidates_state() {
+        // GIVEN
+        let fqin = Fqin::new("com.google.sdv.test", "BundleName", "InstanceName");
+        let lm_fqin = fqin.to_lm_fqin();
+
+        let mut mock_im = MockIInstanceManager::new();
+        // THEN we expect invalidate_state to be called.
+        mock_im.expect_invalidate_state().times(1).return_const(());
+        // And since we'll mock it as not restartable, orchestrate_restart should not be called.
+        mock_im.expect_is_restartable().times(1).returning(|| false);
+        mock_im.expect_orchestrate_restart().never();
+
+        let mock_im = Arc::new(mock_im);
+        let mut factory = MockIInstanceManagerFactory::new();
+        factory.expect_create().returning(move |_| mock_im.clone());
+
+        let engine = OrchestratorEngine::new(
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(None)),
+            Arc::new(factory),
+            get_mock_crash_notifier_persistent_connection(),
+        );
+
+        // WHEN a crash notification is received for the bundle.
+        let result = engine.onServiceBundleCrash(&lm_fqin).await;
+        assert!(result.is_ok());
     }
 }
