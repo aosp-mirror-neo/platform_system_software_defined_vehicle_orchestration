@@ -54,9 +54,10 @@ enum ErrorType {
 /// The last state set for the instance.
 #[derive(PartialEq)]
 enum LastState {
-    /// This case means that we haven't finished applying any transition yet,
-    /// or if LM crashed and we invalidated the states.
+    /// This case means that we haven't finished applying any transition yet.
     Unknown,
+    /// Informs that the bundle crashed or LM crashed, and we invalidated the state.
+    Crashed,
     /// Last state transition ended in an error, so we do not know the actual
     /// state for the instance.
     Error,
@@ -117,9 +118,15 @@ pub trait IInstanceManager: Send + Sync {
     fn is_restartable(&self) -> bool;
     /// Returns true if the instance has a last enforced state of created or started.
     fn is_created_or_started(&self) -> bool;
-    /// Invalidates the last enforced state of the instance.
-    /// This is used when the LM crashes and we don't know the actual state of the instance.
+    /// Notifies that the instance has crashed and we need to invalidate the last state stored.
     fn invalidate_state(&self);
+    /// Reports the current enforced state of this instance to the given listener.
+    /// This is a separate method from `notify_bundle_state_change` because it's specifically for
+    /// reporting to a *newly registered* listener, not for general state changes.
+    fn report_current_state_to_listener(
+        &self,
+        listener: Strong<dyn IServiceBundleInstanceStateChangeListener>,
+    );
 }
 
 /// Handles the lifecycle of a single bundle instance
@@ -249,12 +256,7 @@ impl InstanceManager {
         };
 
         let new_state = self.get_state_to_enforce(request)?;
-
-        let expected_lifecycle_state = &match new_state {
-            InstanceState::Destroyed => ServiceBundleInstanceLifecycleState::DESTROYED,
-            InstanceState::Started => ServiceBundleInstanceLifecycleState::STARTED,
-            InstanceState::Created => ServiceBundleInstanceLifecycleState::CREATED,
-        };
+        let expected_lifecycle_state = &to_lifecycle_state(&new_state);
 
         // This tracks the last error received within all the retries.
         let mut last_error: Option<Status> = None;
@@ -367,6 +369,14 @@ impl InstanceManager {
     }
 }
 
+fn to_lifecycle_state(new_state: &InstanceState) -> ServiceBundleInstanceLifecycleState {
+    match *new_state {
+        InstanceState::Destroyed => ServiceBundleInstanceLifecycleState::DESTROYED,
+        InstanceState::Started => ServiceBundleInstanceLifecycleState::STARTED,
+        InstanceState::Created => ServiceBundleInstanceLifecycleState::CREATED,
+    }
+}
+
 impl IInstanceManager for InstanceManager {
     fn orchestrate_transition_request(&self, request: TransitionRequest) {
         // Lock the enforce_queue to prevent other threads to pushing new tasks before
@@ -451,7 +461,71 @@ impl IInstanceManager for InstanceManager {
     }
 
     fn invalidate_state(&self) {
-        *self.last_enforced_state.lock().unwrap() = LastState::Unknown;
+        *self.last_enforced_state.lock().unwrap() = LastState::Crashed;
+    }
+
+    fn report_current_state_to_listener(
+        &self,
+        listener: Strong<dyn IServiceBundleInstanceStateChangeListener>,
+    ) {
+        if self.current_enforcement_task.lock().unwrap().is_some() {
+            debug!(
+                "There's a current task in progress for instance {:?} which will report the state on completion. Skipping reporting.",
+                self.fqin
+            );
+            return;
+        }
+
+        let reporting_data = match &*self.last_enforced_state.lock().unwrap() {
+            LastState::State(state) => {
+                Some((ServiceBundleInstanceRecoveryState::OPERATIONAL, to_lifecycle_state(state)))
+            }
+            LastState::Crashed => {
+                // If it's not restartable, we notify that the bundle will not retry.
+                if !self.is_restartable() {
+                    self.last_requested_state
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|state| (ServiceBundleInstanceRecoveryState::RETRY_FAILED, to_lifecycle_state(state)))
+                    .or(Some((ServiceBundleInstanceRecoveryState::RETRY_FAILED, ServiceBundleInstanceLifecycleState::SERVICE_BUNDLE_INSTANCE_LIFECYCLE_STATE_UNSPECIFIED)))
+                } else {
+                    warn!(
+                        "Bundle instance {:?} has crashed, but it's restartable. Skipping state reporting as retrying state should be reported.",
+                        self.fqin
+                    );
+                    None
+                }
+            }
+            LastState::Error => {
+                // If there was an error and there's no task in progress, then we report the failure.
+                self.last_requested_state
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|state| (ServiceBundleInstanceRecoveryState::RETRY_FAILED, to_lifecycle_state(state)))
+                    .or(Some((ServiceBundleInstanceRecoveryState::RETRY_FAILED, ServiceBundleInstanceLifecycleState::SERVICE_BUNDLE_INSTANCE_LIFECYCLE_STATE_UNSPECIFIED)))
+            }
+            // For Unknown we do not know the actual state for the instance so we do not report it.
+            // We expect a transition soon that should report the new state.
+            LastState::Unknown => {
+                warn!(
+                    "Unknown state for bundle instance {:?}. Skipping state reporting.",
+                    self.fqin
+                );
+                None
+            }
+        };
+
+        if let Some((recovery_state, expected_state)) = reporting_data {
+            if let Err(e) = listener.onServiceBundleInstanceStateChanged(
+                &self.fqin,
+                recovery_state,
+                expected_state,
+            ) {
+                warn!("Failed to report state of {:?} to new listener: {:?}", self.fqin, e);
+            }
+        }
     }
 }
 
@@ -931,7 +1005,7 @@ mod tests {
     #[tokio::test]
     async fn test_should_not_skip_transition_if_last_state_is_not_set() {
         // GIVEN
-        for last_state in [LastState::Unknown, LastState::Error] {
+        for last_state in [LastState::Unknown, LastState::Error, LastState::Crashed] {
             let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
             let mut mock_lm = MockILifecycleManager::new();
             mock_lm.expect_startService().times(1).returning(|_| Ok(()));
@@ -1331,8 +1405,12 @@ mod tests {
     fn setup_manager_with_mock_listener(
         mock_lm: MockILifecycleManager,
         retry_config: RetryConfiguration,
-    ) -> (Arc<InstanceManager>, Arc<Mutex<MockIServiceBundleInstanceStateChangeListener>>, AidlFqin)
-    {
+    ) -> (
+        Arc<InstanceManager>,
+        Arc<Mutex<MockIServiceBundleInstanceStateChangeListener>>,
+        AidlFqin,
+        Strong<dyn IServiceBundleInstanceStateChangeListener>,
+    ) {
         let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
         let fetcher = MockAllLmManagerWrapper::new(mock_lm);
         let lm_connection = PersistentBinderConnection::new(move || fetcher.get_lm());
@@ -1347,7 +1425,7 @@ mod tests {
         );
 
         let mut subscribers = HashMap::new();
-        subscribers.insert(0, listener_binder);
+        subscribers.insert(0, listener_binder.clone());
 
         let aidl_fqin = fqin.to_lm_fqin();
         let manager = InstanceManager::new(
@@ -1358,7 +1436,7 @@ mod tests {
             Arc::new(Mutex::new(subscribers)),
         );
 
-        (manager, mock_listener, aidl_fqin)
+        (manager, mock_listener, aidl_fqin, listener_binder)
     }
 
     #[tokio::test]
@@ -1367,7 +1445,7 @@ mod tests {
         let mut mock_lm = MockILifecycleManager::new();
         mock_lm.expect_startService().times(1).returning(|_| Ok(()));
 
-        let (manager, mock_listener, service_fqin) =
+        let (manager, mock_listener, service_fqin, _) =
             setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(0));
 
         // THEN
@@ -1403,7 +1481,7 @@ mod tests {
         let mut mock_lm = MockILifecycleManager::new();
         mock_lm.expect_launchService().times(1).returning(|_| Ok(()));
 
-        let (manager, mock_listener, service_fqin) =
+        let (manager, mock_listener, service_fqin, _) =
             setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(0));
 
         // THEN
@@ -1439,7 +1517,7 @@ mod tests {
         let mut mock_lm = MockILifecycleManager::new();
         mock_lm.expect_shutdownService().times(1).returning(|_| Ok(()));
 
-        let (manager, mock_listener, service_fqin) =
+        let (manager, mock_listener, service_fqin, _) =
             setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(0));
         *manager.last_enforced_state.lock().unwrap() = LastState::State(InstanceState::Started);
 
@@ -1476,7 +1554,7 @@ mod tests {
         let mut mock_lm = MockILifecycleManager::new();
         mock_lm.expect_startService().times(1).returning(|_| Ok(()));
 
-        let (manager, mock_listener, service_fqin) =
+        let (manager, mock_listener, service_fqin, _) =
             setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(1));
         let service_fqin_clone = service_fqin.clone();
 
@@ -1528,7 +1606,7 @@ mod tests {
             Err(Status::new_service_specific_error(ResponseCode::SERVICE_NOT_FOUND.0, None))
         });
 
-        let (manager, mock_listener, service_fqin) =
+        let (manager, mock_listener, service_fqin, _) =
             setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(1));
         let service_fqin_clone = service_fqin.clone();
 
@@ -1579,7 +1657,7 @@ mod tests {
             Err(Status::new_service_specific_error(ResponseCode::PERMISSION_DENIED.0, None))
         });
 
-        let (manager, mock_listener, service_fqin) =
+        let (manager, mock_listener, service_fqin, _) =
             setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(5));
 
         // THEN the RETRY_FAILED is notified
@@ -1607,5 +1685,168 @@ mod tests {
 
         // THEN
         assert!(receiver.await.unwrap().is_err());
+    }
+
+    // Report current state to new subscriber tests
+
+    async fn helper_test_report_current_state(
+        last_state: LastState,
+        last_requested_state: Option<InstanceState>,
+        expected_recovery_state: ServiceBundleInstanceRecoveryState,
+        expected_lifecycle_state: ServiceBundleInstanceLifecycleState,
+    ) {
+        // GIVEN
+        let (manager, mock_listener, service_fqin, listener_binder) =
+            setup_manager_with_mock_listener(
+                MockILifecycleManager::new(),
+                RetryConfiguration::new(0),
+            );
+
+        *manager.last_enforced_state.lock().unwrap() = last_state;
+        *manager.last_requested_state.lock().unwrap() = last_requested_state;
+
+        // THEN
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin
+                    && *recovery_state == expected_recovery_state
+                    && *lifecycle_state == expected_lifecycle_state
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+
+        // WHEN
+        manager.report_current_state_to_listener(listener_binder);
+    }
+
+    #[tokio::test]
+    async fn test_report_current_state_to_listener_created() {
+        helper_test_report_current_state(
+            LastState::State(InstanceState::Created),
+            None,
+            ServiceBundleInstanceRecoveryState::OPERATIONAL,
+            ServiceBundleInstanceLifecycleState::CREATED,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_report_current_state_to_listener_started() {
+        helper_test_report_current_state(
+            LastState::State(InstanceState::Started),
+            None,
+            ServiceBundleInstanceRecoveryState::OPERATIONAL,
+            ServiceBundleInstanceLifecycleState::STARTED,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_report_current_state_to_listener_destroyed() {
+        helper_test_report_current_state(
+            LastState::State(InstanceState::Destroyed),
+            None,
+            ServiceBundleInstanceRecoveryState::OPERATIONAL,
+            ServiceBundleInstanceLifecycleState::DESTROYED,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_report_retry_failed_to_listener_for_instance_crashed_with_no_restarts() {
+        helper_test_report_current_state(
+            LastState::Crashed,
+            Some(InstanceState::Started),
+            ServiceBundleInstanceRecoveryState::RETRY_FAILED,
+            ServiceBundleInstanceLifecycleState::STARTED,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_report_failed_retry_to_listener_on_error() {
+        helper_test_report_current_state(
+            LastState::Error,
+            Some(InstanceState::Started),
+            ServiceBundleInstanceRecoveryState::RETRY_FAILED,
+            ServiceBundleInstanceLifecycleState::STARTED,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_does_not_report_state_for_instance_crashed_with_restarts() {
+        // GIVEN
+        let (manager, mock_listener, _fqin, listener_binder) = setup_manager_with_mock_listener(
+            MockILifecycleManager::new(),
+            RetryConfiguration::new(1),
+        );
+        // Set a last requested state for the restart.
+        *manager.last_requested_state.lock().unwrap() = Some(InstanceState::Started);
+        *manager.last_enforced_state.lock().unwrap() = LastState::Crashed;
+
+        // THEN the RETRYING is not reported as the bundle should notify later its state.
+        mock_listener.lock().unwrap().expect_onServiceBundleInstanceStateChanged().never();
+
+        // WHEN
+        manager.report_current_state_to_listener(listener_binder);
+    }
+
+    #[tokio::test]
+    async fn test_does_not_report_state_for_unknown_instance() {
+        // GIVEN
+        let (manager, mock_listener, _fqin, listener_binder) = setup_manager_with_mock_listener(
+            MockILifecycleManager::new(),
+            RetryConfiguration::new(1),
+        );
+
+        // THEN the RETRYING is not reported as the bundle should notify later its state.
+        mock_listener.lock().unwrap().expect_onServiceBundleInstanceStateChanged().never();
+
+        // WHEN
+        manager.report_current_state_to_listener(listener_binder);
+    }
+
+    #[tokio::test]
+    async fn test_does_not_report_state_when_recovering_from_crash() {
+        // GIVEN
+        let (manager, mock_listener, _fqin, listener_binder) = setup_manager_with_mock_listener(
+            MockILifecycleManager::new(),
+            RetryConfiguration::new(1),
+        );
+        // Set a recover in progress
+        *manager.current_enforcement_task.lock().unwrap() = Some(CurrentTaskInfo {
+            cancel: Arc::new(AtomicBool::new(false)),
+            request_type: RequestType::Crash,
+        });
+
+        // THEN the RETRYING is not reported as the bundle should notify later its state.
+        mock_listener.lock().unwrap().expect_onServiceBundleInstanceStateChanged().never();
+
+        // WHEN
+        manager.report_current_state_to_listener(listener_binder);
+    }
+
+    #[tokio::test]
+    async fn test_does_not_report_state_when_enforcing_new_mode() {
+        // GIVEN
+        let (manager, mock_listener, _fqin, listener_binder) = setup_manager_with_mock_listener(
+            MockILifecycleManager::new(),
+            RetryConfiguration::new(1),
+        );
+        // Set a new mode request in progress
+        *manager.current_enforcement_task.lock().unwrap() = Some(CurrentTaskInfo {
+            cancel: Arc::new(AtomicBool::new(false)),
+            request_type: RequestType::NewMode(InstanceState::Started),
+        });
+
+        // THEN the RETRYING is not reported as the bundle should notify later its state.
+        mock_listener.lock().unwrap().expect_onServiceBundleInstanceStateChanged().never();
+
+        // WHEN
+        manager.report_current_state_to_listener(listener_binder);
     }
 }

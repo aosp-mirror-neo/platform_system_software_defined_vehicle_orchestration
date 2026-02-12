@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use binder::BinderFeatures;
 use async_trait::async_trait;
 use binder_tokio::TokioRuntime;
+use google_sdv_orchestration::aidl::google::sdv::orchestration::IServiceBundleInstanceStateChangeListener::IServiceBundleInstanceStateChangeListener;
 use google_sdv_lifecycle_crash_notification_aidl::aidl::google::sdv::lifecycle::internal::crash_notification::IServiceBundleCrashNotificationCallback::{BnServiceBundleCrashNotificationCallback, IServiceBundleCrashNotificationCallbackAsyncServer};
 use google_sdv_lifecycle_crash_notification_aidl::aidl::google::sdv::lifecycle::internal::crash_notification::IServiceBundleCrashNotificationService::IServiceBundleCrashNotificationService;
 use std::io::Error;
@@ -44,8 +45,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
-use tracing::instrument;
 use tokio::runtime::Handle;
+use tokio::sync::mpsc::Receiver;
+use tracing::instrument;
 
 static LM_CALLS_MAX_THREAD_LIMIT: LazyLock<usize> =
     LazyLock::new(|| read_lm_binder_max_parallelism_sys_prop_or_default(read));
@@ -146,6 +148,9 @@ impl OrchestratorEngine {
         crash_notifier_connection: Arc<
             dyn BinderConnectionManager<dyn IServiceBundleCrashNotificationService>,
         >,
+        mut new_listener_receiver: Receiver<
+            binder::Strong<dyn IServiceBundleInstanceStateChangeListener>,
+        >,
     ) -> Self {
         let engine = Self {
             config,
@@ -167,6 +172,14 @@ impl OrchestratorEngine {
             &crash_notifier_connection.get_binder().lock().unwrap(),
             Handle::current(),
         );
+
+        // Spawn task to handle new listeners
+        let engine_clone = engine.clone();
+        tokio::spawn(async move {
+            while let Some(listener) = new_listener_receiver.recv().await {
+                engine_clone.report_all_bundle_states_to_listener(listener);
+            }
+        });
         engine
     }
 
@@ -219,6 +232,15 @@ impl OrchestratorEngine {
 
         info!("Finished enforcing instances states.");
         cancellation.load(Ordering::Relaxed)
+    }
+
+    fn report_all_bundle_states_to_listener(
+        &self,
+        listener: binder::Strong<dyn IServiceBundleInstanceStateChangeListener>,
+    ) {
+        self.enforcing_bundles.lock().unwrap().iter().for_each(|(_, instance)| {
+            instance.report_current_state_to_listener(listener.clone());
+        });
     }
 }
 
@@ -342,6 +364,10 @@ mod tests {
     use crate::instance_manager_factory::IInstanceManagerFactory;
     use crate::instance_manager_factory::MockIInstanceManagerFactory;
     use tokio::sync::broadcast;
+    use google_sdv_orchestration::aidl::google::sdv::orchestration::IServiceBundleInstanceStateChangeListener::MockIServiceBundleInstanceStateChangeListener;
+    use std::time::Duration;
+    use google_sdv_orchestration::aidl::google::sdv::orchestration::IServiceBundleInstanceStateChangeListener::BnServiceBundleInstanceStateChangeListener;
+    use tokio::sync::mpsc;
 
     static TEST_PROTO_PATH: &str = "src/test_protos/unit_test_config_sample.textproto";
     static TEST_PROTO_NO_CONDITION_PATH: &str =
@@ -353,9 +379,15 @@ mod tests {
         Start,
         Shutdown,
     }
+
     struct TestContext {
         lm_interceptor: Arc<LMInterceptor>,
         orch: OrchestratorEngine,
+    }
+
+    fn create_unused_new_subscriber_receiver(
+    ) -> mpsc::Receiver<binder::Strong<dyn IServiceBundleInstanceStateChangeListener>> {
+        mpsc::channel(1).1
     }
 
     impl TestContext {
@@ -379,6 +411,7 @@ mod tests {
                 Arc::new(Mutex::new(None)),
                 factory,
                 get_mock_crash_notifier_persistent_connection(),
+                create_unused_new_subscriber_receiver(),
             );
             Self { lm_interceptor, orch }
         }
@@ -462,6 +495,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             factory,
             get_mock_crash_notifier_persistent_connection(),
+            create_unused_new_subscriber_receiver(),
         );
         // First we start the instances so we can destroy them after
         let mut new_states = HashMap::new();
@@ -509,6 +543,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             factory,
             get_mock_crash_notifier_persistent_connection(),
+            create_unused_new_subscriber_receiver(),
         );
 
         let mut new_states = HashMap::new();
@@ -553,6 +588,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             factory,
             get_mock_crash_notifier_persistent_connection(),
+            create_unused_new_subscriber_receiver(),
         );
 
         let fqins = (1..64_u8)
@@ -897,6 +933,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             Arc::new(factory),
             get_mock_crash_notifier_persistent_connection(),
+            create_unused_new_subscriber_receiver(),
         );
 
         // Enforce an initial state to populate `enforcing_bundles`.
@@ -925,6 +962,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             Arc::new(factory),
             get_mock_crash_notifier_persistent_connection(),
+            create_unused_new_subscriber_receiver(),
         );
 
         // WHEN a default event occurs.
@@ -1051,6 +1089,7 @@ mod tests {
                 dump_state_clone,
                 factory,
                 get_mock_crash_notifier_persistent_connection(),
+                create_unused_new_subscriber_receiver(),
             );
             orch.on_event_update(&UpdateEvent::Default, Arc::new(AtomicBool::new(false))).await;
         });
@@ -1096,6 +1135,7 @@ mod tests {
                 dump_state_clone,
                 factory,
                 get_mock_crash_notifier_persistent_connection(),
+                create_unused_new_subscriber_receiver(),
             );
             orch.on_event_update(&UpdateEvent::Recovery, Arc::new(AtomicBool::new(false))).await;
         });
@@ -1192,6 +1232,7 @@ mod tests {
                 dump_state_clone,
                 factory,
                 get_mock_crash_notifier_persistent_connection(),
+                create_unused_new_subscriber_receiver(),
             );
             orch.on_state_update(&Mode::Power, "ON", Arc::new(AtomicBool::new(false)), &None).await;
         });
@@ -1305,6 +1346,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             factory,
             Arc::new(mock_crash_notifier_binder),
+            create_unused_new_subscriber_receiver(),
         );
     }
 
@@ -1342,6 +1384,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             factory,
             Arc::new(mock_crash_notifier_binder),
+            create_unused_new_subscriber_receiver(),
         );
     }
 
@@ -1375,6 +1418,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             factory,
             Arc::new(mock_crash_notifier_binder),
+            create_unused_new_subscriber_receiver(),
         );
         // WHEN
         let res = engine
@@ -1411,10 +1455,49 @@ mod tests {
             Arc::new(Mutex::new(None)),
             Arc::new(factory),
             get_mock_crash_notifier_persistent_connection(),
+            create_unused_new_subscriber_receiver(),
         );
 
         // WHEN a crash notification is received for the bundle.
         let result = engine.onServiceBundleCrash(&lm_fqin).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_new_state_reporter_listener_added_triggers_state_reporting() {
+        // GIVEN
+        let (new_listener_registered_sender, new_listener_registered_receiver) = mpsc::channel(1);
+
+        let engine = OrchestratorEngine::new(
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(None)),
+            Arc::new(MockIInstanceManagerFactory::new()),
+            get_mock_crash_notifier_persistent_connection(),
+            new_listener_registered_receiver,
+        );
+        let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
+        let mut mock_im = MockIInstanceManager::new();
+        let mock_listener_binder = BnServiceBundleInstanceStateChangeListener::new_binder(
+            MockIServiceBundleInstanceStateChangeListener::new(),
+            BinderFeatures::default(),
+        );
+
+        let (listener_invoked_sender, mut listener_invoked_receiver) = mpsc::channel::<()>(1);
+        mock_im.expect_report_current_state_to_listener().times(1).returning(move |_| {
+            listener_invoked_sender.try_send(()).unwrap();
+        });
+
+        // Inject the instance manager into the enforcing_bundles
+        let mock_im = Arc::new(mock_im);
+        engine.enforcing_bundles.lock().unwrap().insert(fqin.clone(), mock_im);
+
+        // WHEN new listener is added
+        new_listener_registered_sender.send(mock_listener_binder).await.unwrap();
+
+        // THEN the report current state was invoked
+        tokio::time::timeout(Duration::from_secs(1), listener_invoked_receiver.recv())
+            .await
+            .expect("Timeout waiting for receiver invocation")
+            .unwrap();
     }
 }
