@@ -877,35 +877,6 @@ mod tests {
         assert!(res.is_ok());
     }
 
-    // As state is unknown, we do not know if instance is destroyed or not (as could be from
-    // the LM crash), so we proceed to destroy.
-    #[tokio::test]
-    async fn test_should_destroy_instance_with_no_state() {
-        // GIVEN
-        let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
-        let mut mock_lm = MockILifecycleManager::new();
-        mock_lm.expect_shutdownService().times(1).returning(|_| Ok(()));
-        let fetcher = MockAllLmManagerWrapper::new(mock_lm);
-        let manager = InstanceManager::new(
-            fqin.to_lm_fqin(),
-            PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
-            RetryConfiguration::new(3),
-            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
-            Arc::new(Mutex::new(HashMap::new())),
-        );
-        // WHEN
-        let (responder, receiver) = oneshot::channel();
-        let request = TransitionRequest {
-            cancel: Arc::new(AtomicBool::new(false)),
-            responder: Some(responder),
-            request_type: RequestType::NewMode(InstanceState::Destroyed),
-        };
-        manager.orchestrate_transition_request(request);
-        let res = receiver.await.unwrap();
-        // THEN
-        assert!(res.is_ok());
-    }
-
     #[tokio::test]
     async fn test_should_not_destroy_destroyed_instance() {
         // GIVEN
@@ -1003,17 +974,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_not_skip_transition_if_last_state_is_not_set() {
+    async fn test_should_not_skip_transition_to_created_if_last_state_is_not_set() {
+        // GIVEN
+        for last_state in [LastState::Unknown, LastState::Error, LastState::Crashed] {
+            let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
+            let mut mock_lm = MockILifecycleManager::new();
+            mock_lm.expect_launchService().times(1).returning(|_| Ok(()));
+
+            let fetcher = MockAllLmManagerWrapper::new(mock_lm);
+            let manager = InstanceManager::new(
+                fqin.to_lm_fqin(),
+                PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
+                RetryConfiguration::new(3),
+                Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+                Arc::new(Mutex::new(HashMap::new())),
+            );
+            *manager.last_enforced_state.lock().unwrap() = last_state;
+
+            // WHEN
+            let (responder, receiver) = oneshot::channel();
+            let request = TransitionRequest {
+                cancel: Arc::new(AtomicBool::new(false)),
+                responder: Some(responder),
+                request_type: RequestType::NewMode(InstanceState::Created),
+            };
+            manager.orchestrate_transition_request(request);
+            let res = receiver.await.unwrap();
+
+            // THEN the transition should proceed and succeed.
+            assert!(res.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_not_skip_transition_to_started_if_last_state_is_not_set() {
         // GIVEN
         for last_state in [LastState::Unknown, LastState::Error, LastState::Crashed] {
             let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
             let mut mock_lm = MockILifecycleManager::new();
             mock_lm.expect_startService().times(1).returning(|_| Ok(()));
+
             let fetcher = MockAllLmManagerWrapper::new(mock_lm);
             let manager = InstanceManager::new(
                 fqin.to_lm_fqin(),
                 PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
-                RetryConfiguration::new(0),
+                RetryConfiguration::new(3),
                 Arc::new(Mutex::new(Evaluator::new(None, &[]))),
                 Arc::new(Mutex::new(HashMap::new())),
             );
@@ -1025,6 +1030,39 @@ mod tests {
                 cancel: Arc::new(AtomicBool::new(false)),
                 responder: Some(responder),
                 request_type: RequestType::NewMode(InstanceState::Started),
+            };
+            manager.orchestrate_transition_request(request);
+            let res = receiver.await.unwrap();
+
+            // THEN the transition should proceed and succeed.
+            assert!(res.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_not_skip_transition_to_destroyed_if_last_state_is_not_set() {
+        // GIVEN
+        for last_state in [LastState::Unknown, LastState::Error, LastState::Crashed] {
+            let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
+            let mut mock_lm = MockILifecycleManager::new();
+            mock_lm.expect_shutdownService().times(1).returning(|_| Ok(()));
+
+            let fetcher = MockAllLmManagerWrapper::new(mock_lm);
+            let manager = InstanceManager::new(
+                fqin.to_lm_fqin(),
+                PersistentBinderConnection::new(move || fetcher.clone().get_lm()),
+                RetryConfiguration::new(3),
+                Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+                Arc::new(Mutex::new(HashMap::new())),
+            );
+            *manager.last_enforced_state.lock().unwrap() = last_state;
+
+            // WHEN
+            let (responder, receiver) = oneshot::channel();
+            let request = TransitionRequest {
+                cancel: Arc::new(AtomicBool::new(false)),
+                responder: Some(responder),
+                request_type: RequestType::NewMode(InstanceState::Destroyed),
             };
             manager.orchestrate_transition_request(request);
             let res = receiver.await.unwrap();
