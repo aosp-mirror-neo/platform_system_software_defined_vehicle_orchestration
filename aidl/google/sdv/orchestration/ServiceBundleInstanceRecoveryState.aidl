@@ -15,20 +15,22 @@
 package google.sdv.orchestration;
 
 /**
- * Represents health of a service bundle instance from the orchestrator's perspective.
+ * Represents the operational or recovery status of a service bundle instance from the
+ * orchestrator's perspective.
  *
- * This state is used by the orchestrator's restart and retry strategies and contributes to the
- * overall health assessment of the virtual machine.
+ * This state reflects the instance's health, especially during failure recovery scenarios. It is
+ * used by the orchestrator's restart and retry strategies and contributes to the overall health
+ * assessment of the virtual machine.
  */
-enum ServiceBundleInstanceState {
+enum ServiceBundleInstanceRecoveryState {
     /**
      * The default value if no state is specified.
      */
-    SERVICE_BUNDLE_INSTANCE_STATE_UNSPECIFIED = 0,
+    SERVICE_BUNDLE_INSTANCE_RECOVERY_STATE_UNSPECIFIED = 0,
 
     /**
-     * The service bundle instance has successfully reached its required state (created or started),
-     * based on the orchestrator configuration and active modes.
+     * The service bundle instance has successfully reached its required state (created, started,
+     * or destroyed) based on the orchestrator configuration and active modes.
      */
     OPERATIONAL = 1,
 
@@ -44,9 +46,4 @@ enum ServiceBundleInstanceState {
      * No more retries attempts will be made for this instance.
      */
     RETRY_FAILED = 3,
-
-    /**
-     * The service bundle instance was cleanly destroyed and is no longer being tracked.
-     */
-    TERMINATED = 4,
 }
