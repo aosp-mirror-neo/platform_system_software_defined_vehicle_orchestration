@@ -28,7 +28,7 @@ use std::time::Duration;
 pub fn get_service_bundle_fqin_start_stop_destroy() -> ServiceFqin {
     ServiceFqin {
         sdvVmName: "local-vm".to_owned(),
-        sdvPackageName: "com.sdv.google.sample.orch.apex".to_owned(),
+        sdvPackageName: "com.android.sdv.test.orchestrator".to_owned(),
         serviceBundleName: "OrchestratorSampleCppServiceBundle".to_owned(),
         serviceInstanceName: "sample-main-start-stop-destroy".to_owned(),
     }
@@ -38,7 +38,7 @@ pub fn get_service_bundle_fqin_start_stop_destroy() -> ServiceFqin {
 pub fn get_service_bundle_fqin(instance_name: &str) -> ServiceFqin {
     ServiceFqin {
         sdvVmName: "local-vm".to_owned(),
-        sdvPackageName: "com.sdv.google.sample.orch.apex".to_owned(),
+        sdvPackageName: "com.android.sdv.test.orchestrator".to_owned(),
         serviceBundleName: "OrchestratorSampleCppServiceBundle".to_owned(),
         serviceInstanceName: instance_name.to_owned(),
     }
@@ -48,7 +48,7 @@ pub fn get_service_bundle_fqin(instance_name: &str) -> ServiceFqin {
 pub fn get_service_bundle_fqin_no_condition() -> ServiceFqin {
     ServiceFqin {
         sdvVmName: "local-vm".to_owned(),
-        sdvPackageName: "com.sdv.google.sample.orch.apex".to_owned(),
+        sdvPackageName: "com.android.sdv.test.orchestrator".to_owned(),
         serviceBundleName: "OrchestratorSampleRustServiceBundle".to_owned(),
         serviceInstanceName: "sample-main-no-conditions".to_owned(),
     }
@@ -58,7 +58,7 @@ pub fn get_service_bundle_fqin_no_condition() -> ServiceFqin {
 pub fn get_service_bundle_fqin_initial_power_state() -> ServiceFqin {
     ServiceFqin {
         sdvVmName: "local-vm".to_owned(),
-        sdvPackageName: "com.sdv.google.sample.orch.apex".to_owned(),
+        sdvPackageName: "com.android.sdv.test.orchestrator".to_owned(),
         serviceBundleName: "OrchSampleInitialPowerState".to_owned(),
         serviceInstanceName: "sample-initial-power-state".to_owned(),
     }

@@ -20,7 +20,7 @@ package {
 
 // Apex to store C++ and Rust orch samples.
 apex {
-    name: "com.sdv.google.sample.orch.apex",
+    name: "com.android.sdv.test.orchestrator",
     native_shared_libs: [
         // C++ service bundle to be included in the apex.
         "liboem_orchestrator_service_bundle_cpp_sample",
@@ -34,7 +34,7 @@ apex {
     manifest: "apex_manifest.json",
     prebuilts: [
         // SDV service bundles manifest file.
-        "com.sdv.google.sample.orch.apex.manifest",
+        "com.android.sdv.test.orchestrator.manifest",
         // Linker configuration to enable loading library from apex.
         "com.sdv.google.sample.orch.linker-config",
         // Orchestration configurations.
@@ -43,7 +43,7 @@ apex {
         "OrchSampleInitialPowerState-orch-config",
     ],
     // Name of the apex_key module that provides the private key to sign the APEX bundle.
-    key: "com.sdv.google.sample.orch.apex_key",
+    key: "com.android.sdv.test.orchestrator_key",
     // TODO(b/333868045): make it updatable when all SDV dependencies are ready.
     updatable: false,
     // This module is installed into /product partition.
@@ -52,14 +52,14 @@ apex {
 
 // The key for signing orch sample apex.
 apex_key {
-    name: "com.sdv.google.sample.orch.apex_key",
-    public_key: "com.sdv.google.sample.orch.apex.avbpubkey",
-    private_key: "com.sdv.google.sample.orch.apex.pem",
+    name: "com.android.sdv.test.orchestrator_key",
+    public_key: "com.android.sdv.test.orchestrator.avbpubkey",
+    private_key: "com.android.sdv.test.orchestrator.pem",
 }
 
 // SDV manifest file with the metadata information about service bundles stored in the apex.
 prebuilt_etc {
-    name: "com.sdv.google.sample.orch.apex.manifest",
+    name: "com.android.sdv.test.orchestrator.manifest",
     // The source name of the manifest file.
     src: "sdv_service_bundles_manifest.textproto",
     // The name of the installed file shall be `sdv_service_bundles_manifest.textproto`.

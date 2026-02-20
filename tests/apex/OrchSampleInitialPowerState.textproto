@@ -16,7 +16,7 @@
 
 instance: "sample-initial-power-state"
 service_bundle_name: "OrchSampleInitialPowerState"
-package_name: "com.sdv.google.sample.orch.apex"
+package_name: "com.android.sdv.test.orchestrator"
 
 state {
   condition {

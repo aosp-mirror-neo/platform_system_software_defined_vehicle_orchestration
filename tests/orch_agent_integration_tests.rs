@@ -20,13 +20,13 @@
 
 #[cfg(test)]
 mod tests {
-    use com_sdv_google_orchestrator_custom_state_service_rpc::Client;
+    use com_android_sdv_orchestrator_custom_state_service_rpc::Client;
     use named_lock::NamedLock;
     use protobuf::well_known_types::timestamp::Timestamp;
     use protobuf::MessageField;
     use sdv_comms::id::ServiceFqin as Fqin;
     use sdv_comms::ContextRef;
-    use sdv_mw_rs_com_sdv_google_orchestrator_test_orch_test_service_bundle::OrchTestServiceBundle;
+    use sdv_mw_rs_com_android_sdv_orchestrator_test_orch_test_service_bundle::OrchTestServiceBundle;
     use sdv_mw_rs_comms::ClientOptions;
     use sdv_mw_rs_comms::RpcClient;
     use sdv_mw_rs_comms::UnitName;
@@ -43,7 +43,7 @@ mod tests {
         async fn new(instance_name: &str) -> Self {
             let fqin = Fqin::builder()
                 .sdv_vm_name("local-vm")
-                .sdv_package_name("com.sdv.google.sample.orch.apex")
+                .sdv_package_name("com.android.sdv.test.orchestrator")
                 .service_bundle_name("OrchestratorSampleCppServiceBundle")
                 .service_instance_name(instance_name) // We need a different instance so there's no error when LM creates the Context for each bundle instance created
                 .build()
@@ -55,7 +55,7 @@ mod tests {
             let custom_modes_client = bundle
                 .create_rpc_client::<Client>(
                     UnitName::builder()
-                        .package_name("com.sdv.google.orchestrator")
+                        .package_name("com.android.sdv.orchestrator")
                         .bundle_name("OrchestratorServiceBundle")
                         .service_unit_name(Client::DEFAULT_UNIT_NAME)
                         .build()

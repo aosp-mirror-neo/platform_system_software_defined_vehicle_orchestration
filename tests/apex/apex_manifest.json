@@ -1,5 +1,5 @@
 {
-  "name": "com.sdv.google.sample.orch.apex",
+  "name": "com.android.sdv.test.orchestrator",
   "version": 0,
   "requireNativeLibs": [
     "libsdv_comms_ctx_ffi.so",
