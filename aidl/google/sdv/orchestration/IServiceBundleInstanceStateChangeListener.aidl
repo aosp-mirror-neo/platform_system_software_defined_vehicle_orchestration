@@ -15,19 +15,34 @@
 package google.sdv.orchestration;
 
 import google.sdv.identity.ServiceFqin;
-import google.sdv.orchestration.ServiceBundleInstanceState;
+import google.sdv.orchestration.ServiceBundleInstanceLifecycleState;
+import google.sdv.orchestration.ServiceBundleInstanceRecoveryState;
 
 /**
- * A callback used to get notified of updates of service bundle instance state changes from the
+ * A callback used to get notified of service bundle instance state changes from the
  * orchestrator.
  */
 oneway interface IServiceBundleInstanceStateChangeListener {
     /**
-     * Inform to subscribers that a service bundle with the given FQIN has change its state.
+     * Informs subscribers that a service bundle instance has changed its state.
      *
-     * @param fqin The FQIN of the service bundle that reports a new state.
-     * @param newState The new state of the service bundle instance.
+     * The `expectedLifecycleState` represents the lifecycle state that the orchestrator intends
+     * for the service bundle instance to be in, based on the current configuration and active
+     * modes.
+     *
+     * The `newRecoveryState` indicates the status of reaching that intended lifecycle state:
+     *  - `OPERATIONAL`: The instance has successfully reached the `expectedLifecycleState`.
+     *  - `RETRYING`: The instance failed to reach the `expectedLifecycleState` (e.g., due to a
+     *    crash or a transition failure), and the orchestrator is attempting to recover it.
+     *  - `RETRY_FAILED`: The orchestrator has stopped trying to recover the instance after
+     *    repeated failures. The instance should be at `expectedLifecycleState`.
+     *
+     * @param fqin The FQIN of the service bundle instance that changed state.
+     * @param newRecoveryState The new recovery state of the service bundle instance.
+     * @param expectedLifecycleState The intended lifecycle state for the service bundle instance.
      */
     void onServiceBundleInstanceStateChanged(
-            in ServiceFqin fqin, ServiceBundleInstanceState newState);
+            in ServiceFqin fqin,
+            ServiceBundleInstanceRecoveryState newRecoveryState,
+            ServiceBundleInstanceLifecycleState expectedLifecycleState);
 }

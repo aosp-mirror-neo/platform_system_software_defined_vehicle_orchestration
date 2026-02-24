@@ -17,6 +17,8 @@
 
 use crate::instance_manager::{IInstanceManager, InstanceManager};
 use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ILifecycleManager::ILifecycleManager;
+use google_sdv_orchestration::aidl::google::sdv::orchestration::IServiceBundleInstanceStateChangeListener::IServiceBundleInstanceStateChangeListener;
+use binder::Strong;
 use mockall::automock;
 use persistent_binder::BinderConnectionManager;
 use sdv_orch_dist_config::evaluator::Evaluator;
@@ -39,6 +41,8 @@ pub struct InstanceManagerFactory {
     lm_connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,
     restart_config: Arc<HashMap<Fqin, RetryConfiguration>>,
     config: Arc<Mutex<Evaluator>>,
+    bundle_updates_subscribers:
+        Arc<Mutex<HashMap<u32, Strong<dyn IServiceBundleInstanceStateChangeListener>>>>,
 }
 
 impl InstanceManagerFactory {
@@ -47,8 +51,11 @@ impl InstanceManagerFactory {
         lm_connection: Arc<dyn BinderConnectionManager<dyn ILifecycleManager>>,
         restart_config: Arc<HashMap<Fqin, RetryConfiguration>>,
         config: Arc<Mutex<Evaluator>>,
+        bundle_updates_subscribers: Arc<
+            Mutex<HashMap<u32, Strong<dyn IServiceBundleInstanceStateChangeListener>>>,
+        >,
     ) -> Self {
-        Self { lm_connection, restart_config, config }
+        Self { lm_connection, restart_config, config, bundle_updates_subscribers }
     }
 }
 
@@ -57,10 +64,11 @@ impl IInstanceManagerFactory for InstanceManagerFactory {
         let retry_config =
             self.restart_config.get(fqin).cloned().unwrap_or_else(|| RetryConfiguration::new(0));
         InstanceManager::new(
-            fqin.clone(),
+            fqin.to_lm_fqin(),
             self.lm_connection.clone(),
             retry_config,
             self.config.clone(),
+            self.bundle_updates_subscribers.clone(),
         )
     }
 }
