@@ -52,7 +52,7 @@ enum ErrorType {
 }
 
 /// The last state set for the instance.
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum LastState {
     /// This case means that we haven't finished applying any transition yet.
     Unknown,
@@ -120,6 +120,8 @@ pub trait IInstanceManager: Send + Sync {
     fn is_created_or_started(&self) -> bool;
     /// Notifies that the instance has crashed and we need to invalidate the last state stored.
     fn invalidate_state(&self);
+    /// Reports that the bundle has crashed and is not restartable.
+    fn handle_non_restartable_bundle_crash(&self);
     /// Reports the current enforced state of this instance to the given listener.
     /// This is a separate method from `notify_bundle_state_change` because it's specifically for
     /// reporting to a *newly registered* listener, not for general state changes.
@@ -462,6 +464,25 @@ impl IInstanceManager for InstanceManager {
 
     fn invalidate_state(&self) {
         *self.last_enforced_state.lock().unwrap() = LastState::Crashed;
+    }
+
+    fn handle_non_restartable_bundle_crash(&self) {
+        let (recovery_state, expected_state) = self
+            .last_requested_state
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|state| (ServiceBundleInstanceRecoveryState::RETRY_FAILED, to_lifecycle_state(state)))
+                    .unwrap_or((ServiceBundleInstanceRecoveryState::RETRY_FAILED,
+                        ServiceBundleInstanceLifecycleState::SERVICE_BUNDLE_INSTANCE_LIFECYCLE_STATE_UNSPECIFIED));
+        self.bundle_updates_subscribers.lock().unwrap().iter().for_each(|(uid, listener)| {
+            if let Err(e) = listener.onServiceBundleInstanceStateChanged(&self.fqin, recovery_state, expected_state) {
+                warn!(
+                    "Failed to notify subscriber with UID {uid} of bundle instance {:?} state change to {:?}-{:?}: {e:?}",
+                    self.fqin, recovery_state, expected_state
+                );
+            }
+        });
     }
 
     fn report_current_state_to_listener(
@@ -1886,5 +1907,60 @@ mod tests {
 
         // WHEN
         manager.report_current_state_to_listener(listener_binder);
+    }
+
+    #[tokio::test]
+    async fn test_report_crashed_bundle_send_report_to_subscribers_with_last_state() {
+        // GIVEN
+        let (manager, mock_listener, service_fqin, _) = setup_manager_with_mock_listener(
+            MockILifecycleManager::new(),
+            RetryConfiguration::new(0),
+        );
+
+        *manager.last_requested_state.lock().unwrap() = Some(InstanceState::Started);
+
+        // THEN
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::RETRY_FAILED
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+
+        // WHEN
+        manager.handle_non_restartable_bundle_crash();
+    }
+
+    #[tokio::test]
+    async fn test_report_crashed_bundle_send_report_to_subscribers_with_unspecified_state() {
+        // GIVEN
+        let (manager, mock_listener, service_fqin, _) = setup_manager_with_mock_listener(
+            MockILifecycleManager::new(),
+            RetryConfiguration::new(0),
+        );
+
+        // last_requested_state is None by default
+
+        // THEN
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::RETRY_FAILED
+                    && *lifecycle_state
+                        == ServiceBundleInstanceLifecycleState::SERVICE_BUNDLE_INSTANCE_LIFECYCLE_STATE_UNSPECIFIED
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+
+        // WHEN
+        manager.handle_non_restartable_bundle_crash();
     }
 }
