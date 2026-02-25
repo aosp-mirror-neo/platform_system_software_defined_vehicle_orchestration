@@ -16,7 +16,7 @@
 
 instance: "sample-main-no-conditions"
 service_bundle_name: "OrchestratorSampleRustServiceBundle"
-package_name: "com.sdv.google.sample.orch.apex"
+package_name: "com.android.sdv.test.orchestrator"
 
 state {
   instances_states {

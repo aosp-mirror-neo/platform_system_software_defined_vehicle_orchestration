@@ -28,8 +28,8 @@ use regex::Error as RegexError;
 use regex::Regex;
 use sdv_comms::id::ServiceFqin;
 use sdv_comms::sd::UnitType;
-use sdv_mw_rs_com_sdv_google_orchestrator_orchestrator_service_bundle::publisher;
-use sdv_mw_rs_com_sdv_google_orchestrator_orchestrator_service_bundle::OrchestratorServiceBundle;
+use sdv_mw_rs_com_android_sdv_orchestrator_orchestrator_service_bundle::publisher;
+use sdv_mw_rs_com_android_sdv_orchestrator_orchestrator_service_bundle::OrchestratorServiceBundle;
 use sdv_mw_rs_comms::Publisher;
 use sdv_mw_rs_comms::{SubscribeOptions, UnitName, UnitQuery};
 use sdv_orch_api_stable::global_custom_modes::GlobalCustomStateChange;
@@ -79,7 +79,7 @@ pub(crate) struct CustomModesHandler {
 }
 
 #[async_trait::async_trait]
-impl com_sdv_google_orchestrator_custom_state_service_rpc::Interface for CustomModesHandler {
+impl com_android_sdv_orchestrator_custom_state_service_rpc::Interface for CustomModesHandler {
     async fn SetCustomState(
         &self,
         caller_id: sdv_comms::id::ServiceFqin,
@@ -274,7 +274,7 @@ async fn subscribe_to_custom_modes(
     polling_time: Duration,
 ) {
     if let Ok(unit_type) = UnitType::builder()
-        .set_sdv_package_name("com.sdv.google.orchestrator")
+        .set_sdv_package_name("com.android.sdv.orchestrator")
         .set_service_bundle_name("OrchestratorServiceBundle")
         .set_unit_type_name("GlobalCustomStateChange")
         .build()
@@ -461,7 +461,7 @@ async fn create_observer(
         .get_publication(&UnitQuery::Name(
             UnitName::builder()
                 .vm_name(vm_name)
-                .package_name("com.sdv.google.orchestrator")
+                .package_name("com.android.sdv.orchestrator")
                 .bundle_name("OrchestratorServiceBundle")
                 .service_unit_name(unit_name)
                 .build()?,
@@ -491,7 +491,7 @@ mod tests {
     use super::*;
     use crate::states::orchestration_comms::MockOrchestrationComms;
     use crate::states::orchestration_comms::ServiceUnitIdentity;
-    use com_sdv_google_orchestrator_custom_state_service_rpc::Interface;
+    use com_android_sdv_orchestrator_custom_state_service_rpc::Interface;
     use futures::stream;
     use protobuf::well_known_types::timestamp::Timestamp;
     use protobuf::MessageField;
