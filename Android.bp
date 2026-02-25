@@ -59,7 +59,7 @@ rust_defaults {
         "libbinder_tokio_rs",
         "libdashmap",
         "libsdv_orchestration_common",
-        "google.sdv.service_bundles_registry-V2-rust",
+        "google.sdv.service_bundles_registry-V3-rust",
         "libpersistent_binder",
     ],
     proc_macros: [
