@@ -52,7 +52,7 @@ enum ErrorType {
 }
 
 /// The last state set for the instance.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 enum LastState {
     /// This case means that we haven't finished applying any transition yet.
     Unknown,
@@ -116,8 +116,11 @@ pub trait IInstanceManager: Send + Sync {
     fn orchestrate_restart(&self) -> Option<oneshot::Receiver<Result<(), Status>>>;
     /// Returns whether the instance supports restarts based on its configuration.
     fn is_restartable(&self) -> bool;
-    /// Returns true if the instance has a last enforced state of created or started.
-    fn is_created_or_started(&self) -> bool;
+    /// Returns true if the instance has a last enforced state not destroyed.
+    /// This is used to analyze whether we need to destroy this bundle if it became obsolete.
+    /// In case of last state being Crash, Unknown or Error, we proceed to the destroy to
+    /// bring the bundle to a valid state and report this to all the subscribers.
+    fn is_not_destroyed(&self) -> bool;
     /// Notifies that the instance has crashed and we need to invalidate the last state stored.
     fn invalidate_state(&self);
     /// Reports that the bundle has crashed and is not restartable.
@@ -456,10 +459,8 @@ impl IInstanceManager for InstanceManager {
         receiver
     }
 
-    fn is_created_or_started(&self) -> bool {
-        let last_state = self.last_enforced_state.lock().unwrap();
-        *last_state == LastState::State(InstanceState::Created)
-            || *last_state == LastState::State(InstanceState::Started)
+    fn is_not_destroyed(&self) -> bool {
+        *self.last_enforced_state.lock().unwrap() != LastState::State(InstanceState::Destroyed)
     }
 
     fn invalidate_state(&self) {
@@ -1962,5 +1963,34 @@ mod tests {
 
         // WHEN
         manager.handle_non_restartable_bundle_crash();
+    }
+
+    #[tokio::test]
+    async fn test_is_not_destroyed() {
+        // GIVEN
+        let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
+        let mock_lm = MockILifecycleManager::new();
+        let fetcher = MockAllLmManagerWrapper::new(mock_lm);
+        let manager = InstanceManager::new(
+            fqin.to_lm_fqin(),
+            PersistentBinderConnection::new(move || fetcher.get_lm()),
+            RetryConfiguration::new(0),
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        let test_cases = [
+            (LastState::Unknown, true),
+            (LastState::Crashed, true),
+            (LastState::Error, true),
+            (LastState::State(InstanceState::Created), true),
+            (LastState::State(InstanceState::Started), true),
+            (LastState::State(InstanceState::Destroyed), false),
+        ];
+
+        for (state, expected) in &test_cases {
+            *manager.last_enforced_state.lock().unwrap() = state.clone();
+            assert_eq!(manager.is_not_destroyed(), *expected, "Failed for state: {:?}", state);
+        }
     }
 }

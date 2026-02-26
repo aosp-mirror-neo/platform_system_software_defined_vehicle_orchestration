@@ -193,7 +193,7 @@ impl OrchestratorEngine {
     ) -> bool {
         // Ensure that obsolete services are destroyed.
         self.enforcing_bundles.lock().unwrap().iter().for_each(|(fqin, instance)| {
-            if !instances_states.contains_key(fqin) && instance.is_created_or_started() {
+            if !instances_states.contains_key(fqin) && instance.is_not_destroyed() {
                 instances_states.insert(fqin.clone(), InstanceState::Destroyed);
             }
         });
@@ -921,8 +921,8 @@ mod tests {
         let mut mock_im = MockIInstanceManager::new();
         // We expect `invalidate_state` to be called exactly once.
         mock_im.expect_invalidate_state().times(1).return_const(());
-        // We need to mock `is_created_or_started` as it's called when destroying obsolete services.
-        mock_im.expect_is_created_or_started().returning(|| true);
+        // We need to mock `is_not_destroyed` as it's called when destroying obsolete services.
+        mock_im.expect_is_not_destroyed().returning(|| true);
         // We need to mock `orchestrate_transition_request` as it's called to enforce the new state.
         mock_im.expect_orchestrate_transition_request().return_const(());
         let mock_im = Arc::new(mock_im);
@@ -952,7 +952,7 @@ mod tests {
         let mut mock_im = MockIInstanceManager::new();
         // We expect `invalidate_state` to never be called.
         mock_im.expect_invalidate_state().never();
-        mock_im.expect_is_created_or_started().returning(|| false);
+        mock_im.expect_is_not_destroyed().returning(|| false);
         mock_im.expect_orchestrate_transition_request().return_const(());
         let mock_im = Arc::new(mock_im);
 
