@@ -26,7 +26,7 @@ use sdv_comms::sd::ServiceUnitDefinition;
 use sdv_comms::sd::UnitChangeEventStream;
 use sdv_comms::sd::UnitNameDiscoveryArgs;
 use sdv_comms::sd::UnitType;
-use sdv_mw_rs_com_sdv_google_orchestrator_orchestrator_service_bundle::OrchestratorServiceBundle;
+use sdv_mw_rs_com_android_sdv_orchestrator_orchestrator_service_bundle::OrchestratorServiceBundle;
 use sdv_mw_rs_comms::Communicate;
 use sdv_mw_rs_comms::Publication;
 use sdv_mw_rs_comms::UnitQuery;
@@ -44,7 +44,7 @@ pub(crate) trait OrchestrationComms: Send + Sync {
     async fn get_orch_service_bundle(
         &self,
         servers: (
-            std::sync::Arc<dyn com_sdv_google_orchestrator_custom_state_service_rpc::Interface>,
+            std::sync::Arc<dyn com_android_sdv_orchestrator_custom_state_service_rpc::Interface>,
         ),
     ) -> SdvResult<OrchestratorServiceBundle>;
 
@@ -153,7 +153,7 @@ impl OrchestrationComms for SdvComms {
     async fn get_orch_service_bundle(
         &self,
         servers: (
-            std::sync::Arc<dyn com_sdv_google_orchestrator_custom_state_service_rpc::Interface>,
+            std::sync::Arc<dyn com_android_sdv_orchestrator_custom_state_service_rpc::Interface>,
         ),
     ) -> SdvResult<OrchestratorServiceBundle> {
         OrchestratorServiceBundle::new(Arc::new(self.clone()), servers).await

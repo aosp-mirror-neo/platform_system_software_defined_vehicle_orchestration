@@ -18,7 +18,7 @@ syntax = "proto3";
 
 import "google/protobuf/timestamp.proto";
 
-package com.sdv.google.orchestrator;
+package com.android.sdv.orchestrator;
 
 // Representation of the request used by service bundles to update a custom mode.
 // Service bundles are permitted to update only the custom modes specifically designated

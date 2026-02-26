@@ -23,7 +23,7 @@ acls {
 
 acls {
     name: "Internal"
-    include: "*:com.sdv.google.orchestrator.OrchestratorServiceBundle"
+    include: "*:com.android.sdv.orchestrator.OrchestratorServiceBundle"
 }
 
 unit_types {
@@ -32,7 +32,7 @@ unit_types {
 }
 
 service_units {
-    name: "com-sdv-google-orchestrator-global-custom-state-change-unique"
+    name: "com-android-sdv-orchestrator-global-custom-state-change-unique"
     acl_names: "Internal"
 }
 
@@ -42,6 +42,6 @@ unit_types {
 }
 
 service_units {
-    name: "com-sdv-google-orchestrator-custom-state-service"
+    name: "com-android-sdv-orchestrator-custom-state-service"
     acl_names: "Public"
 }

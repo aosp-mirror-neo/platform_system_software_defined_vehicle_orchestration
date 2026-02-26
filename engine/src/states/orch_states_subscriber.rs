@@ -127,7 +127,7 @@ impl OrchStateSubscriber {
         }
         let fqin = ServiceFqin::builder()
             .sdv_vm_name("vm")
-            .sdv_package_name("com.sdv.google.orchestrator")
+            .sdv_package_name("com.android.sdv.orchestrator")
             .service_bundle_name("OrchestratorServiceBundle")
             .service_instance_name("default")
             .build()
