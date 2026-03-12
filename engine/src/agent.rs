@@ -19,11 +19,13 @@ pub(crate) mod instance_manager;
 pub(crate) mod instance_manager_factory;
 pub(crate) mod orch_binder;
 pub mod states;
+pub(crate) mod system_properties_handler;
 use crate::engine::OrchestratorEngine;
 use crate::orch_binder::bundle_state_reporter_service::ServiceBundleStateReporterService;
 use crate::states::orch_states_updates_handler::OrchestratorStateUpdatesHandler;
 use crate::states::states_subscriber_interface::StatesClientSubscriber;
 use crate::instance_manager_factory::InstanceManagerFactory;
+use crate::system_properties_handler::SystemProperties;
 use crate::states::ORCH_POWER_READY_PROP;
 use crate::states::ORCH_VEHICLE_READY_PROP;
 use google_sdv_lifecycle_manager::aidl::google::sdv::lifecycle::ILifecycleManager::{
@@ -57,6 +59,9 @@ const ORCH_CONFIG_ENV: &str = "persist.sdv.orchestrator_config_path";
 /// Invoke: dumpsys com.google.sdv.ISdvAgent/orch
 static BINDER_TAG: &str = "orch"; // see agent's SELinux policies
 static DUMP_REPORT_TITLE: &str = "SDV Agent dump - Orchestrator";
+
+const DEFAULT_RECOVERY_MAX_RETRIES_PROP: &str = "ro.boot.sdv.orchestrator.recovery.max_retries";
+const DEFAULT_RETRIES_FALLBACK_VALUE: u32 = 0u32;
 
 #[derive(Clone)]
 /// Orchestrator agent
@@ -118,6 +123,10 @@ impl Agent {
             restart_config,
             evaluator.clone(),
             bundle_updates_subscribers,
+            SystemProperties::read_property(
+                DEFAULT_RECOVERY_MAX_RETRIES_PROP,
+                DEFAULT_RETRIES_FALLBACK_VALUE,
+            ),
         ));
         let orch = Arc::new(OrchestratorEngine::new(
             evaluator,

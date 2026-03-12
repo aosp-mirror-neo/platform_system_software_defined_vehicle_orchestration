@@ -67,18 +67,18 @@ message InstanceToRetryMapping {
   // has crashed. Upon a successful operation, the retry counter are reset to max_retries. This
   // configuration can be applied to any service bundle, not only the monitored ones. If the
   // configuration is not provided or none of the optional fields are filled, the default behavior
-  // stated is applied (oneshot instances).
+  // stated is applied (the value from `ro.boot.sdv.orchestrator.recovery.max_retries`
+  // or zero if not set).
   message RetryConfiguration {
-    // Required.
-    //
     // The number of times a retry/restart operation can be performed.
     // Defines the number of times the orchestrator will retry a transition
     // after a transient failure or after a bundle crash notification.
     // This applies to creating, starting and destroying operations.
     // The retry count will reset to max_retries after a successful operation.
-    // If not set, no retries will be applied (defaults to 0), considering the
-    // bundle as a oneshot service.
-    uint32 max_retries = 1;
+    // If not set, the default configured value in the
+    // `ro.boot.sdv.orchestrator.recovery.max_retries` will be used, or-if not set-
+    // it will fallback to zero.
+    optional uint32 max_retries = 1;
   }
 }
 

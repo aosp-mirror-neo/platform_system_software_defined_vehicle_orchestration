@@ -349,16 +349,18 @@ fn parse_bundle_config(
                 }
             })
             .for_each(|fqin| {
-                let new_config =
-                    RetryConfiguration::new(retry_mapping.retry_config.max_retries);
-                retry_configuration
-                    .entry(fqin)
-                    .and_modify(|existing_config| {
-                        if new_config.max_retries > existing_config.max_retries {
-                            *existing_config = new_config;
-                        }
-                    })
-                    .or_insert(new_config);
+                if let Some(retries) = &retry_mapping.retry_config.max_retries {
+                    let new_config =
+                        RetryConfiguration::new(*retries);
+                    retry_configuration
+                        .entry(fqin)
+                        .and_modify(|existing_config| {
+                            if new_config.max_retries > existing_config.max_retries {
+                                *existing_config = new_config;
+                            }
+                        })
+                        .or_insert(new_config);
+                }
             });
     });
 

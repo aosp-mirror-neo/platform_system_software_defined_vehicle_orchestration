@@ -16,16 +16,15 @@
 //! Handles the internal orchestrator logic, starting and stopping services on VPM updates.
 
 use crate::instance_manager_factory::IInstanceManagerFactory;
-use crate::instance_manager::{IInstanceManager, RequestType};
+use crate::instance_manager::{IInstanceManager, RequestType, TransitionRequest};
+use crate::system_properties_handler::SystemProperties;
 use crate::StatesUpdateHandler;
-use crate::instance_manager::TransitionRequest;
 use futures::future;
 use futures::{FutureExt, StreamExt};
-use google_sdv_lifecycle_manager::binder;
+use google_sdv_lifecycle_manager::{self, binder};
 use persistent_binder::BinderConnectionManager;
 use log::{debug, error, info, warn};
 use protobuf::well_known_types::timestamp::Timestamp;
-use rustutils::android::system_properties::read;
 use rustutils::android::system_properties;
 use sdv_dump::DumpStateReporter;
 use sdv_orch_dist_config::evaluator::Evaluator;
@@ -49,41 +48,22 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::Receiver;
 use tracing::instrument;
 
-static LM_CALLS_MAX_THREAD_LIMIT: LazyLock<usize> =
-    LazyLock::new(|| read_lm_binder_max_parallelism_sys_prop_or_default(read));
+static LM_CALLS_MAX_THREAD_LIMIT: LazyLock<usize> = LazyLock::new(|| {
+    SystemProperties::read_property(
+        LM_CALLS_MAX_THREAD_LIMIT_PROPERTY,
+        FALLBACK_LM_CALLS_MAX_THREAD,
+    )
+});
 
 const FALLBACK_LM_CALLS_MAX_THREAD: usize = 12;
 const ORCH_STATE_READY_PROP: &str = "ro.sdv.orchestrator.state.ready";
 const LM_CALLS_MAX_THREAD_LIMIT_PROPERTY: &str = "ro.boot.sdv.max_bundles_management_threads";
 
-fn read_lm_binder_max_parallelism_sys_prop_or_default(
-    read: fn(&str) -> system_properties::error::Result<Option<String>>,
-) -> usize {
-    read(LM_CALLS_MAX_THREAD_LIMIT_PROPERTY).ok().flatten().map_or_else(
-        || {
-            error!(
-                "Could not read orchestration parallelism property, check sys config. \
-                Using default max threads: {FALLBACK_LM_CALLS_MAX_THREAD}"
-            );
-            FALLBACK_LM_CALLS_MAX_THREAD
-        },
-        |prop_str| {
-            prop_str.parse::<usize>().unwrap_or_else(|_| {
-                error!(
-                    "Could not parse orchestration parallelism property, check sys config. \
-                    Using default max thread: {FALLBACK_LM_CALLS_MAX_THREAD}"
-                );
-                FALLBACK_LM_CALLS_MAX_THREAD
-            })
-        },
-    )
-}
-
 /// Sets the orchestrator ready property to true if it's not already set.
 /// This property is read-only after being set once, so we avoid trying to write it again
 /// to prevent unnecessary errors in the log.
 fn set_orchestrator_ready_prop() {
-    if read(ORCH_STATE_READY_PROP).ok().flatten().as_deref() != Some("true") {
+    if system_properties::read(ORCH_STATE_READY_PROP).ok().flatten().as_deref() != Some("true") {
         if let Err(ref e) = system_properties::write(ORCH_STATE_READY_PROP, "true") {
             error!("Couldn't write property '{ORCH_STATE_READY_PROP}': {e}");
         }
@@ -406,6 +386,7 @@ mod tests {
                 restart_config,
                 evaluator.clone(),
                 Arc::new(Mutex::new(HashMap::new())),
+                0,
             ));
             let orch = OrchestratorEngine::new(
                 evaluator,
@@ -490,6 +471,7 @@ mod tests {
             Arc::new(HashMap::new()),
             evaluator.clone(),
             Arc::new(Mutex::new(HashMap::new())),
+            0,
         ));
         let test_orch = OrchestratorEngine::new(
             evaluator,
@@ -538,6 +520,7 @@ mod tests {
             Arc::new(HashMap::new()),
             evaluator.clone(),
             Arc::new(Mutex::new(HashMap::new())),
+            0,
         ));
         let test_orch = OrchestratorEngine::new(
             evaluator,
@@ -583,6 +566,7 @@ mod tests {
             Arc::new(HashMap::new()),
             evaluator.clone(),
             Arc::new(Mutex::new(HashMap::new())),
+            0,
         ));
         let test_orch = OrchestratorEngine::new(
             evaluator,
@@ -1084,6 +1068,7 @@ mod tests {
                 Arc::new(HashMap::new()),
                 evaluator.clone(),
                 Arc::new(Mutex::new(HashMap::new())),
+                0,
             ));
             let orch = OrchestratorEngine::new(
                 evaluator,
@@ -1130,6 +1115,7 @@ mod tests {
                 Arc::new(HashMap::new()),
                 evaluator.clone(),
                 Arc::new(Mutex::new(HashMap::new())),
+                0,
             ));
             let orch = OrchestratorEngine::new(
                 evaluator,
@@ -1227,6 +1213,7 @@ mod tests {
                 Arc::new(HashMap::new()),
                 evaluator.clone(),
                 Arc::new(Mutex::new(HashMap::new())),
+                0,
             ));
             let orch = OrchestratorEngine::new(
                 evaluator,
@@ -1294,22 +1281,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_read_or_default_returns_set_sys_prop() {
-        const EXPECTED_VALUE: usize = 99;
-        let read_value = read_lm_binder_max_parallelism_sys_prop_or_default(|sys_prop_name| {
-            assert!(sys_prop_name == LM_CALLS_MAX_THREAD_LIMIT_PROPERTY);
-            Ok(Some(EXPECTED_VALUE.to_string()))
-        });
-        assert!(read_value == EXPECTED_VALUE);
-    }
-
-    #[tokio::test]
-    async fn test_get_sys_prop_returns_fallback_if_missing_sys_prop() {
-        let read_value = read_lm_binder_max_parallelism_sys_prop_or_default(|_| Ok(None));
-        assert!(read_value == FALLBACK_LM_CALLS_MAX_THREAD);
-    }
-
     // Crash notification subscription tests
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1341,6 +1312,7 @@ mod tests {
             Arc::new(HashMap::new()),
             evaluator.clone(),
             Arc::new(Mutex::new(HashMap::new())),
+            0,
         ));
         OrchestratorEngine::new(
             evaluator,
@@ -1379,6 +1351,7 @@ mod tests {
             Arc::new(HashMap::new()),
             evaluator.clone(),
             Arc::new(Mutex::new(HashMap::new())),
+            0,
         ));
         OrchestratorEngine::new(
             evaluator,
@@ -1412,6 +1385,7 @@ mod tests {
             Arc::new(HashMap::new()),
             evaluator.clone(),
             Arc::new(Mutex::new(HashMap::new())),
+            0,
         ));
         let engine = OrchestratorEngine::new(
             evaluator,
