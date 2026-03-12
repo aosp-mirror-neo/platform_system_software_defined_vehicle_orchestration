@@ -45,3 +45,25 @@ service_units {
     name: "com-android-sdv-orchestrator-custom-state-service"
     acl_names: "Public"
 }
+
+# Permissions
+
+publisher {
+    message: "com.android.sdv.orchestrator.GlobalCustomStateChange"
+    topic: "com-android-sdv-orchestrator-global-custom-state-change-unique"
+}
+
+server {
+    service: "com.android.sdv.orchestrator.CustomStateService"
+    channel: "com-android-sdv-orchestrator-custom-state-service"
+}
+
+subscriber {
+    message: "com.android.sdv.orchestrator.GlobalCustomStateChange"
+    topic: "com-android-sdv-orchestrator-global-custom-state-change-unique"
+}
+
+subscriber {
+    message: "com.android.sdv.vpm.vehicle.VehicleStateChange"
+    topic: "com-android-sdv-vpm-vehicle-vehicle-state-change-unique"
+}
