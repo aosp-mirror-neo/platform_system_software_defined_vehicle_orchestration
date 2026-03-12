@@ -129,11 +129,12 @@ impl IServiceBundleCrashNotificationCallbackAsyncServer for OrchestratorEngine {
         // If the bundle has crashed, the state we have assigned previously is not valid anymore.
         instance_manager.invalidate_state();
         if !instance_manager.is_restartable() {
+            instance_manager.handle_non_restartable_bundle_crash();
             // Log is used in e2e tests. Please do not change, or update e2e tests if necessary.
             warn!("Bundle with {:?} has crashed, but it is not restartable.", instance);
-            return Ok(());
+        } else {
+            instance_manager.orchestrate_restart();
         }
-        instance_manager.orchestrate_restart();
         Ok(())
     }
 }
@@ -192,7 +193,7 @@ impl OrchestratorEngine {
     ) -> bool {
         // Ensure that obsolete services are destroyed.
         self.enforcing_bundles.lock().unwrap().iter().for_each(|(fqin, instance)| {
-            if !instances_states.contains_key(fqin) && instance.is_created_or_started() {
+            if !instances_states.contains_key(fqin) && instance.is_not_destroyed() {
                 instances_states.insert(fqin.clone(), InstanceState::Destroyed);
             }
         });
@@ -920,8 +921,8 @@ mod tests {
         let mut mock_im = MockIInstanceManager::new();
         // We expect `invalidate_state` to be called exactly once.
         mock_im.expect_invalidate_state().times(1).return_const(());
-        // We need to mock `is_created_or_started` as it's called when destroying obsolete services.
-        mock_im.expect_is_created_or_started().returning(|| true);
+        // We need to mock `is_not_destroyed` as it's called when destroying obsolete services.
+        mock_im.expect_is_not_destroyed().returning(|| true);
         // We need to mock `orchestrate_transition_request` as it's called to enforce the new state.
         mock_im.expect_orchestrate_transition_request().return_const(());
         let mock_im = Arc::new(mock_im);
@@ -951,7 +952,7 @@ mod tests {
         let mut mock_im = MockIInstanceManager::new();
         // We expect `invalidate_state` to never be called.
         mock_im.expect_invalidate_state().never();
-        mock_im.expect_is_created_or_started().returning(|| false);
+        mock_im.expect_is_not_destroyed().returning(|| false);
         mock_im.expect_orchestrate_transition_request().return_const(());
         let mock_im = Arc::new(mock_im);
 
@@ -1390,7 +1391,6 @@ mod tests {
 
     // Crash notification tests
 
-    // TODO(b/419239856): rename when crash behavior is added
     #[tokio::test(flavor = "multi_thread")]
     async fn test_should_return_ok_on_crash_notification() {
         // GIVEN
@@ -1434,7 +1434,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_on_crash_notification_invalidates_state() {
+    async fn test_on_crash_notification_it_invalidates_state_and_handles_non_restartable_bundle() {
         // GIVEN
         let fqin = Fqin::new("com.google.sdv.test", "BundleName", "InstanceName");
         let lm_fqin = fqin.to_lm_fqin();
@@ -1444,7 +1444,39 @@ mod tests {
         mock_im.expect_invalidate_state().times(1).return_const(());
         // And since we'll mock it as not restartable, orchestrate_restart should not be called.
         mock_im.expect_is_restartable().times(1).returning(|| false);
+        mock_im.expect_handle_non_restartable_bundle_crash().times(1).return_const(());
         mock_im.expect_orchestrate_restart().never();
+
+        let mock_im = Arc::new(mock_im);
+        let mut factory = MockIInstanceManagerFactory::new();
+        factory.expect_create().returning(move |_| mock_im.clone());
+
+        let engine = OrchestratorEngine::new(
+            Arc::new(Mutex::new(Evaluator::new(None, &[]))),
+            Arc::new(Mutex::new(None)),
+            Arc::new(factory),
+            get_mock_crash_notifier_persistent_connection(),
+            create_unused_new_subscriber_receiver(),
+        );
+
+        // WHEN a crash notification is received for the bundle.
+        let result = engine.onServiceBundleCrash(&lm_fqin).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_on_crash_notification_it_invalidates_state_and_restarts_restartable_bundle() {
+        // GIVEN
+        let fqin = Fqin::new("com.google.sdv.test", "BundleName", "InstanceName");
+        let lm_fqin = fqin.to_lm_fqin();
+
+        let mut mock_im = MockIInstanceManager::new();
+        // THEN we expect invalidate_state to be called.
+        mock_im.expect_invalidate_state().times(1).return_const(());
+        // And since we'll mock it as not restartable, orchestrate_restart should not be called.
+        mock_im.expect_is_restartable().times(1).returning(|| true);
+        mock_im.expect_handle_non_restartable_bundle_crash().never();
+        mock_im.expect_orchestrate_restart().times(1).returning(|| None);
 
         let mock_im = Arc::new(mock_im);
         let mut factory = MockIInstanceManagerFactory::new();
