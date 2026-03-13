@@ -25,6 +25,7 @@ instance: "sample-main-start-stop-destroy"
 service_bundle_name: "OrchestratorSampleCppServiceBundle"
 package_name: "com.android.sdv.test.orchestrator"
 custom_mode: "CHARGING"
+custom_mode: "LIFECYCLE"
 
 state {
     condition {
