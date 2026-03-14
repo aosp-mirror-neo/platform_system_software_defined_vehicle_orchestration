@@ -132,9 +132,12 @@ rust_test {
         "tests/orch_agent_integration_tests.rs",
     ],
     rustlibs: [
+        "google.sdv.orchestration-rust",
+        "google.sdv.identity-V2-rust",
         "libsdv_mw_rs_com_android_sdv_orchestrator_test_orch_test_service_bundle",
         "libprotobuf",
         "libnamed_lock",
+        "libbinder_rs",
         "libsdv_status_rs",
         "libsdv_comms_rs",
         "libsdv_orch_tests_common",

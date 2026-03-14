@@ -17,9 +17,219 @@
 instance: "sample-main-no-conditions"
 service_bundle_name: "OrchestratorSampleRustServiceBundle"
 package_name: "com.android.sdv.test.orchestrator"
+# Instances for rust integration tests
+instance: "sample-main-no-conditions"
+instance: "panic-create-restarts"
+instance: "panic-create-no-restarts"
+instance: "panic-start-no-restarts"
+instance: "panic-start-restarts"
+instance: "lifecycle"
+instance: "lifecycle-destroy"
+instance: "panic-stop-no-restarts"
+instance: "panic-stop-restarts"
+instance: "panic-destroy-no-restarts"
+instance: "panic-destroy-restarts"
+instance: "panic-create-on-start-restarts"
 
 state {
   instances_states {
     started: "sample-main-no-conditions"
+  }
+}
+
+retry_mapping {
+  instance: "panic-create-restarts"
+  instance: "panic-start-restarts"
+  instance: "panic-destroy-restarts"
+  instance: "panic-stop-restarts"
+  instance: "panic-create-on-start-restarts"
+  retry_config { max_retries: 1 }
+}
+
+retry_mapping {
+  instance: "panic-create-no-restarts"
+  instance: "panic-start-no-restarts"
+  instance: "panic-stop-no-restarts"
+  instance: "panic-destroy-no-restarts"
+  retry_config { max_retries: 0 }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "panic-create-no-restarts"
+    }
+  }
+  instances_states {
+      created: "panic-create-no-restarts"
+  }
+}
+
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "panic-create-restarts"
+    }
+  }
+  instances_states {
+      created: "panic-create-restarts"
+  }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "panic-start-no-restarts"
+    }
+  }
+  instances_states {
+      started: "panic-start-no-restarts"
+  }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "panic-start-restarts"
+    }
+  }
+  instances_states {
+      started: "panic-start-restarts"
+  }
+}
+
+# These instances will always be created until the state is changed.
+state {
+  instances_states {
+      created: "panic-start-no-restarts"
+      created: "panic-start-restarts"
+      created: "lifecycle-destroy"
+      started: "panic-destroy-no-restarts"
+      started: "panic-destroy-restarts"
+  }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "panic-stop-no-restarts-start"
+    }
+  }
+  instances_states {
+      started: "panic-stop-no-restarts"
+  }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "panic-stop-no-restarts"
+    }
+  }
+  instances_states {
+      created: "panic-stop-no-restarts"
+  }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "panic-stop-restarts-start"
+    }
+  }
+  instances_states {
+      started: "panic-stop-restarts"
+  }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "panic-stop-restarts"
+    }
+  }
+  instances_states {
+      created: "panic-stop-restarts"
+  }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "panic-create-on-start-restarts-start"
+    }
+  }
+  instances_states {
+      started: "panic-create-on-start-restarts"
+  }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "panic-destroy-no-restarts"
+    }
+  }
+  instances_states {
+      destroyed: "panic-destroy-no-restarts"
+  }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "panic-destroy-restarts"
+    }
+  }
+  instances_states {
+      destroyed: "panic-destroy-restarts"
+  }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "create"
+    }
+  }
+  instances_states {
+      created: "lifecycle"
+  }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "start"
+    }
+  }
+  instances_states {
+      started: "lifecycle"
+  }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "LIFECYCLE"
+        state: "destroy"
+    }
+  }
+  instances_states {
+      destroyed: "lifecycle-destroy"
   }
 }

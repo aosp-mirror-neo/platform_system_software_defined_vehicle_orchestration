@@ -44,6 +44,16 @@ pub fn get_service_bundle_fqin(instance_name: &str) -> ServiceFqin {
     }
 }
 
+/// Returns the OrchestratorSampleRustServiceBundle service bundle with given instance fqin
+pub fn get_rust_service_bundle_fqin(instance_name: &str) -> ServiceFqin {
+    ServiceFqin {
+        sdvVmName: "local-vm".to_owned(),
+        sdvPackageName: "com.android.sdv.test.orchestrator".to_owned(),
+        serviceBundleName: "OrchestratorSampleRustServiceBundle".to_owned(),
+        serviceInstanceName: instance_name.to_owned(),
+    }
+}
+
 /// Returns the sample-main-no-conditions service bundle fqin
 pub fn get_service_bundle_fqin_no_condition() -> ServiceFqin {
     ServiceFqin {
