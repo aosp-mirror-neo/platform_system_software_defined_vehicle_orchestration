@@ -31,7 +31,7 @@ use sdv_orchestration_common::fqin::Fqin;
 use sdv_orchestration_common::instance_state::InstanceState;
 use sdv_orchestration_common::retry_configuration::RetryConfiguration;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::{oneshot, Notify};
@@ -158,6 +158,12 @@ pub struct InstanceManager {
     /// The orchestrator configuration that will be used in case of a restart when no
     /// last_requested_state is available.
     config: Arc<Mutex<Evaluator>>,
+    /// Number of retries left for the current transition. This value resets to the
+    /// configured max_retries whenever a NewMode request is processed or when a transition
+    /// is successful. If there are multiple failures and crashes, the value won't be reset,
+    /// preventing infinite recover tasks.
+    remaining_retries: Arc<AtomicU32>,
+    /// Subscribers for instance state changes.
     bundle_updates_subscribers:
         Arc<Mutex<HashMap<u32, Strong<dyn IServiceBundleInstanceStateChangeListener>>>>,
 }
@@ -178,6 +184,8 @@ impl InstanceManager {
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let notifier = Arc::new(Notify::new());
         let current_enforcement_task = Arc::new(Mutex::new(None));
+        // We set the max_retries initially in case the bundle was started in a previous session.
+        let retries = Arc::new(AtomicU32::new(restart_config.max_retries));
 
         let manager = Arc::new(Self {
             last_enforced_state: last_enforced_state.clone(),
@@ -190,6 +198,7 @@ impl InstanceManager {
             lm_connection: lm_connection.clone(),
             config,
             bundle_updates_subscribers,
+            remaining_retries: retries,
         });
 
         // Spawn the enforcement task
@@ -221,8 +230,17 @@ impl InstanceManager {
                     break;
                 };
 
-                if let RequestType::NewMode(state) = &request.request_type {
-                    *self.last_requested_state.lock().unwrap() = Some(state.clone());
+                match &request.request_type {
+                    RequestType::NewMode(state) => {
+                        *self.last_requested_state.lock().unwrap() = Some(state.clone());
+                        // In case of a new mode, we add 1 on top of the retries as the first
+                        // request is not from retries.
+                        self.remaining_retries
+                            .store(self.restart_config.max_retries + 1, Ordering::Relaxed);
+                    }
+                    // In case of a crash, we don't change the retries value.
+                    // It will use the value from the last successful transition.
+                    RequestType::Crash => (),
                 }
 
                 *self.current_enforcement_task.lock().unwrap() = Some(CurrentTaskInfo {
@@ -231,6 +249,13 @@ impl InstanceManager {
                 });
 
                 let result = self.enforce_transition(&request);
+
+                if result.is_ok() {
+                    // If the transition was successful, we reset the retries to the max value
+                    // for the next potential crash.
+                    self.remaining_retries
+                        .store(self.restart_config.max_retries, Ordering::Relaxed);
+                }
 
                 if let Some(responder) = request.responder.take() {
                     let res = responder.send(result);
@@ -251,28 +276,34 @@ impl InstanceManager {
     /// Enforces a transition request, handling retries and cancellation.
     /// Returns a result to be sent to the request's responder.
     fn enforce_transition(&self, request: &TransitionRequest) -> Result<(), Status> {
-        let retries = match request.request_type {
-            // In case of a new mode, we add 1 on top of the retries as the first
-            // request is not from retries.
-            RequestType::NewMode(_) => self.restart_config.max_retries + 1,
-            // In case of restart, we set it to max_retries as it won't be restarted
-            // if not retryable.
-            RequestType::Crash => self.restart_config.max_retries,
-        };
-
         let new_state = self.get_state_to_enforce(request)?;
+
+        // If it's already in requested state, we skip the enforcement.
+        if *self.last_enforced_state.lock().unwrap() == LastState::State(new_state.clone()) {
+            info!(
+                "Bundle {:?} is already in desired state {:?}, skipping transition.",
+                self.fqin, new_state
+            );
+            return Ok(());
+        }
+
         let expected_lifecycle_state = &to_lifecycle_state(&new_state);
 
         // This tracks the last error received within all the retries.
         let mut last_error: Option<Status> = None;
-        for attempt in 0..retries {
+        // Transitions cannot happen in parallel for the same instance so the global retries
+        // will not change within this task.
+        let retries_for_transition = self.remaining_retries.load(Ordering::Relaxed);
+        for _ in 0..retries_for_transition {
             if request.cancel.load(Ordering::Relaxed) {
                 break;
             }
 
-            // We notify we are retrying either after the 2nd request in case of NewMode
-            // or every time in case of Crash.
-            if attempt > 0 || request.request_type == RequestType::Crash {
+            // We notify that we are retrying if it's not the first attempt for a NewMode request
+            // (retries have been consumed) or if it's a Crash recovery.
+            if self.remaining_retries.load(Ordering::Relaxed) < retries_for_transition
+                || request.request_type == RequestType::Crash
+            {
                 self.notify_bundle_state_change(
                     &ServiceBundleInstanceRecoveryState::RETRYING,
                     expected_lifecycle_state,
@@ -295,6 +326,7 @@ impl InstanceManager {
                 }
                 Err((message, error_type)) => {
                     *self.last_enforced_state.lock().unwrap() = LastState::Error;
+                    self.remaining_retries.fetch_sub(1, Ordering::Relaxed);
                     if error_type == ErrorType::Permanent {
                         self.notify_bundle_state_change(
                             &ServiceBundleInstanceRecoveryState::RETRY_FAILED,
@@ -307,6 +339,7 @@ impl InstanceManager {
             };
         }
 
+        // Notify that the bundle won't be recovered
         self.notify_bundle_state_change(
             &ServiceBundleInstanceRecoveryState::RETRY_FAILED,
             expected_lifecycle_state,
@@ -364,6 +397,7 @@ impl InstanceManager {
         expected_state: &ServiceBundleInstanceLifecycleState,
     ) {
         self.bundle_updates_subscribers.lock().unwrap().iter().for_each(|(uid, listener)| {
+            info!("Notifying subscribers of new state for instance {:?}, with recovery state {:?} and lifecycle state {:?}", self.fqin, recovery_state, expected_state);
             if let Err(e) = listener.onServiceBundleInstanceStateChanged(&self.fqin, *recovery_state, *expected_state) {
                 warn!(
                     "Failed to notify subscriber with UID {uid} of bundle instance {:?} state change to {:?}-{:?}: {e:?}",
@@ -397,27 +431,6 @@ impl IInstanceManager for InstanceManager {
         // So we only keep the NewMode requests.
         enforce_queue_guard.retain(|req| matches!(req.request_type, RequestType::NewMode(_)));
 
-        let last_state_guard = self.last_enforced_state.lock().unwrap();
-        // If it's already in requested state, we skip the enforcement.
-        if let RequestType::NewMode(ref new_state) = request.request_type {
-            if *last_state_guard == LastState::State(new_state.clone()) {
-                info!(
-                    "Bundle {:?} is already in desired state {:?}, skipping transition.",
-                    self.fqin, new_state
-                );
-                if let Some(responder) = request.responder {
-                    let res = responder.send(Ok(()));
-                    if let Err(err) = res {
-                        warn!(
-                            "Failed to notify skipped transition {:?} for instance {:?}: {err:?}",
-                            new_state, self.fqin
-                        );
-                    }
-                    return;
-                }
-            }
-        }
-
         enforce_queue_guard.push_back(request);
 
         // Drop the guard to release the lock before notifying the other task.
@@ -434,6 +447,7 @@ impl IInstanceManager for InstanceManager {
     // The return value is used in tests only
     fn orchestrate_restart(&self) -> Option<oneshot::Receiver<Result<(), Status>>> {
         let mut enforce_queue = self.enforce_queue.lock().unwrap();
+
         // If there is a request in the queue to transition to a new state, we skip the restart as
         // that transition will handle the state of this instance.
         if enforce_queue.iter().any(|req| matches!(req.request_type, RequestType::NewMode(_))) {
@@ -477,6 +491,7 @@ impl IInstanceManager for InstanceManager {
                     .unwrap_or((ServiceBundleInstanceRecoveryState::RETRY_FAILED,
                         ServiceBundleInstanceLifecycleState::SERVICE_BUNDLE_INSTANCE_LIFECYCLE_STATE_UNSPECIFIED));
         self.bundle_updates_subscribers.lock().unwrap().iter().for_each(|(uid, listener)| {
+            info!("Notifying subscribers of new state for instance {:?}, with recovery state {:?} and lifecycle state {:?}", self.fqin, recovery_state, expected_state);
             if let Err(e) = listener.onServiceBundleInstanceStateChanged(&self.fqin, recovery_state, expected_state) {
                 warn!(
                     "Failed to notify subscriber with UID {uid} of bundle instance {:?} state change to {:?}-{:?}: {e:?}",
@@ -502,31 +517,14 @@ impl IInstanceManager for InstanceManager {
             LastState::State(state) => {
                 Some((ServiceBundleInstanceRecoveryState::OPERATIONAL, to_lifecycle_state(state)))
             }
-            LastState::Crashed => {
-                // If it's not restartable, we notify that the bundle will not retry.
-                if !self.is_restartable() {
-                    self.last_requested_state
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map(|state| (ServiceBundleInstanceRecoveryState::RETRY_FAILED, to_lifecycle_state(state)))
-                    .or(Some((ServiceBundleInstanceRecoveryState::RETRY_FAILED, ServiceBundleInstanceLifecycleState::SERVICE_BUNDLE_INSTANCE_LIFECYCLE_STATE_UNSPECIFIED)))
-                } else {
-                    warn!(
-                        "Bundle instance {:?} has crashed, but it's restartable. Skipping state reporting as retrying state should be reported.",
-                        self.fqin
-                    );
-                    None
-                }
-            }
-            LastState::Error => {
-                // If there was an error and there's no task in progress, then we report the failure.
+            // If there was an error or crash, and there's no task in progress, then we report the failure.
+            LastState::Crashed | LastState::Error => {
                 self.last_requested_state
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map(|state| (ServiceBundleInstanceRecoveryState::RETRY_FAILED, to_lifecycle_state(state)))
-                    .or(Some((ServiceBundleInstanceRecoveryState::RETRY_FAILED, ServiceBundleInstanceLifecycleState::SERVICE_BUNDLE_INSTANCE_LIFECYCLE_STATE_UNSPECIFIED)))
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|state| (ServiceBundleInstanceRecoveryState::RETRY_FAILED, to_lifecycle_state(state)))
+                .or(Some((ServiceBundleInstanceRecoveryState::RETRY_FAILED, ServiceBundleInstanceLifecycleState::SERVICE_BUNDLE_INSTANCE_LIFECYCLE_STATE_UNSPECIFIED)))
             }
             // For Unknown we do not know the actual state for the instance so we do not report it.
             // We expect a transition soon that should report the new state.
@@ -540,6 +538,10 @@ impl IInstanceManager for InstanceManager {
         };
 
         if let Some((recovery_state, expected_state)) = reporting_data {
+            info!(
+                "Notifying subscribers of new state for instance {:?}, with recovery state {:?} and lifecycle state {:?}",
+                self.fqin, recovery_state, expected_state
+            );
             if let Err(e) = listener.onServiceBundleInstanceStateChanged(
                 &self.fqin,
                 recovery_state,
@@ -569,12 +571,8 @@ impl InstanceManager {
             ));
         }
         match Self::try_lifecycle_transition(lm_connection.clone(), fqin, &new_state.clone()) {
-            Ok(()) => {
-                // TODO(b/437891686): notify state to HM
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(message) => {
-                // TODO(b/437891686): notify state to HM
                 warn!(
                     "Failed to transition service instance {:?} to {:?}: {message}",
                     fqin, new_state
@@ -1277,6 +1275,179 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_restart_exhausts_retries_on_transient_error() {
+        // GIVEN
+        let mut mock_lm = MockILifecycleManager::new();
+        // The restart will be attempted once, and it will fail.
+        mock_lm.expect_startService().times(1).returning(|_| {
+            Err(Status::new_service_specific_error(ResponseCode::INTERNAL_ERROR.0, None))
+        });
+
+        let (manager, mock_listener, service_fqin, _) =
+            setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(1));
+        let service_fqin_clone = service_fqin.clone();
+
+        let mut seq = mockall::Sequence::new();
+        // THEN we expect a RETRYING notification from the first restart
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin_clone
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::RETRYING
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _| Ok(()));
+
+        // THEN we expect a RETRY_FAILED notification from both restarts
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::RETRY_FAILED
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(2)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _| Ok(()));
+
+        // Set a last requested state to restart to.
+        *manager.last_requested_state.lock().unwrap() = Some(InstanceState::Started);
+
+        // We restart the bundle once, which will fail and exhaust the retries
+        let receiver = manager.orchestrate_restart().unwrap();
+        let result = receiver.await.unwrap();
+        assert!(result.is_err());
+
+        // WHEN a second restart comes with no retries left
+        let receiver = manager.orchestrate_restart().unwrap();
+        // THEN the restart fails.
+        let result = receiver.await.unwrap();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_restart_exhausts_retries_on_persistent_error() {
+        // GIVEN
+        let mut mock_lm = MockILifecycleManager::new();
+        // The restart will be attempted once, and it will fail.
+        mock_lm.expect_startService().times(1).returning(|_| {
+            Err(Status::new_service_specific_error(ResponseCode::VALUE_CORRUPTED.0, None))
+        });
+        // The restart will attempt to kill the service once on the first restart.
+        mock_lm.expect_killService().times(1).returning(|_| Ok(()));
+
+        let (manager, mock_listener, service_fqin, _) =
+            setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(1));
+        let service_fqin_clone = service_fqin.clone();
+
+        let mut seq = mockall::Sequence::new();
+        // THEN we expect a RETRYING notification from the first restart
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin_clone
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::RETRYING
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _| Ok(()));
+
+        // THEN we expect a RETRY_FAILED notification from both restarts
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::RETRY_FAILED
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(2)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _| Ok(()));
+
+        // Set a last requested state to restart to.
+        *manager.last_requested_state.lock().unwrap() = Some(InstanceState::Started);
+
+        // We restart the bundle once, which will fail and exhaust the retries
+        let receiver = manager.orchestrate_restart().unwrap();
+        let result = receiver.await.unwrap();
+        assert!(result.is_err());
+
+        // WHEN a second restart comes with no retries left
+        let receiver = manager.orchestrate_restart().unwrap();
+        // THEN the restart fails.
+        let result = receiver.await.unwrap();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_restart_exhausts_retries_on_permanent_error() {
+        // GIVEN
+        let mut mock_lm = MockILifecycleManager::new();
+        // The restart will be attempted once, and it will fail.
+        mock_lm.expect_startService().times(1).returning(|_| {
+            Err(Status::new_service_specific_error(ResponseCode::PERMISSION_DENIED.0, None))
+        });
+
+        let (manager, mock_listener, service_fqin, _) =
+            setup_manager_with_mock_listener(mock_lm, RetryConfiguration::new(1));
+        let service_fqin_clone = service_fqin.clone();
+
+        let mut seq = mockall::Sequence::new();
+        // THEN we expect a RETRYING notification from the first restart
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin_clone
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::RETRYING
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _| Ok(()));
+
+        // THEN we expect a RETRY_FAILED notification from both restarts
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::RETRY_FAILED
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(2)
+            .in_sequence(&mut seq)
+            .returning(|_, _, _| Ok(()));
+
+        // Set a last requested state to restart to.
+        *manager.last_requested_state.lock().unwrap() = Some(InstanceState::Started);
+
+        // We restart the bundle once, which will fail and exhaust the retries
+        let receiver = manager.orchestrate_restart().unwrap();
+        let result = receiver.await.unwrap();
+        assert!(result.is_err());
+
+        // WHEN a second restart comes with no retries left
+        let receiver = manager.orchestrate_restart().unwrap();
+        // THEN the restart fails.
+        let result = receiver.await.unwrap();
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
     async fn test_orchestrate_restart_is_skipped_if_new_mode_request_is_pending() {
         // GIVEN
         let fqin = Fqin::new("com.google.sdv.test", "ServiceName", "instance");
@@ -1827,6 +1998,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_report_retry_failed_to_listener_for_instance_crashed_with_restarts() {
+        // GIVEN
+        let (manager, mock_listener, service_fqin, listener_binder) =
+            setup_manager_with_mock_listener(
+                MockILifecycleManager::new(),
+                RetryConfiguration::new(1),
+            );
+        // Set a last requested state for the restart.
+        *manager.last_requested_state.lock().unwrap() = Some(InstanceState::Started);
+        *manager.last_enforced_state.lock().unwrap() = LastState::Crashed;
+
+        // THEN the RETRY_FAILED is reported
+        mock_listener
+            .lock()
+            .unwrap()
+            .expect_onServiceBundleInstanceStateChanged()
+            .withf(move |fqin, recovery_state, lifecycle_state| {
+                *fqin == service_fqin
+                    && *recovery_state == ServiceBundleInstanceRecoveryState::RETRY_FAILED
+                    && *lifecycle_state == ServiceBundleInstanceLifecycleState::STARTED
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+
+        // WHEN
+        manager.report_current_state_to_listener(listener_binder);
+    }
+
+    #[tokio::test]
     async fn test_report_failed_retry_to_listener_on_error() {
         helper_test_report_current_state(
             LastState::Error,
@@ -1835,24 +2035,6 @@ mod tests {
             ServiceBundleInstanceLifecycleState::STARTED,
         )
         .await;
-    }
-
-    #[tokio::test]
-    async fn test_does_not_report_state_for_instance_crashed_with_restarts() {
-        // GIVEN
-        let (manager, mock_listener, _fqin, listener_binder) = setup_manager_with_mock_listener(
-            MockILifecycleManager::new(),
-            RetryConfiguration::new(1),
-        );
-        // Set a last requested state for the restart.
-        *manager.last_requested_state.lock().unwrap() = Some(InstanceState::Started);
-        *manager.last_enforced_state.lock().unwrap() = LastState::Crashed;
-
-        // THEN the RETRYING is not reported as the bundle should notify later its state.
-        mock_listener.lock().unwrap().expect_onServiceBundleInstanceStateChanged().never();
-
-        // WHEN
-        manager.report_current_state_to_listener(listener_binder);
     }
 
     #[tokio::test]

@@ -43,8 +43,13 @@ impl ServiceBundle for OrchServiceBundle {
 
     fn on_start(&mut self) {
         debug!("OrchServiceBundleRust::on_start() called for {:?}", self.context.get_self_fqin());
-        if ["panic-start-no-restarts", "panic-start-restarts"]
-            .contains(&self.context.get_self_fqin().get_service_instance_name())
+        if [
+            "panic-start-no-restarts",
+            "panic-start-restarts",
+            "crash-on-start-no-restarts",
+            "crash-on-start-restarts",
+        ]
+        .contains(&self.context.get_self_fqin().get_service_instance_name())
         {
             panic!("Bundle crashed");
         }
