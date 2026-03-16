@@ -14,7 +14,6 @@
 # proto-file: system/software_defined_vehicle/orchestration/src/distributed_config/protos/service_bundle_config.proto
 # proto-message: ServiceBundleConfig
 
-instance: "sample-main-no-conditions"
 service_bundle_name: "OrchestratorSampleRustServiceBundle"
 package_name: "com.android.sdv.test.orchestrator"
 # Instances for rust integration tests
@@ -30,7 +29,14 @@ instance: "panic-stop-restarts"
 instance: "panic-destroy-no-restarts"
 instance: "panic-destroy-restarts"
 instance: "panic-create-on-start-restarts"
+# Instances for python e2e tests
+instance: "crash-on-create-no-restarts"
+instance: "crash-on-create-restarts"
+instance: "crash-on-start-no-restarts"
+instance: "crash-on-start-restarts"
 
+
+# Modes are used in rust integration tests. Do not change nor remove.
 state {
   instances_states {
     started: "sample-main-no-conditions"
@@ -232,4 +238,41 @@ state {
   instances_states {
       destroyed: "lifecycle-destroy"
   }
+}
+
+# Modes are used in E2E tests. Do not change nor remove.
+retry_mapping {
+  instance: "crash-on-create-no-restarts"
+  instance: "crash-on-start-no-restarts"
+  retry_config { max_retries: 0 }
+}
+
+retry_mapping {
+  instance: "crash-on-create-restarts"
+  instance: "crash-on-start-restarts"
+  retry_config { max_retries: 1 }
+}
+
+state {
+  condition { custom_state { mode: "E2E-TESTS" state: "crash-on-create-restarts" } }
+  instances_states { created: "crash-on-create-restarts" }
+}
+
+state {
+  condition { custom_state { mode: "E2E-TESTS" state: "crash-on-create-no-restarts" } }
+  instances_states { created: "crash-on-create-no-restarts" }
+}
+
+state {
+  instances_states { created: "crash-on-start-no-restarts" created: "crash-on-start-restarts" }
+}
+
+state {
+  condition { custom_state { mode: "E2E-TESTS" state: "crash-on-start-no-restarts" } }
+  instances_states { started: "crash-on-start-no-restarts" }
+}
+
+state {
+  condition { custom_state { mode: "E2E-TESTS" state: "crash-on-start-restarts" } }
+  instances_states { started: "crash-on-start-restarts" }
 }
