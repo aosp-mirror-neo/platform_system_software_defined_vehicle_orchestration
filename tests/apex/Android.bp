@@ -40,7 +40,9 @@ apex {
         // Orchestration configurations.
         "OrchestratorSampleRustServiceBundle-orch-config",
         "OrchestratorSampleCppServiceBundle-orch-config",
+        "OrchestratorSampleCppServiceBundle-permissions-config",
         "OrchSampleInitialPowerState-orch-config",
+        "OrchTestServiceBundle-permissions-config",
     ],
     // Name of the apex_key module that provides the private key to sign the APEX bundle.
     key: "com.android.sdv.test.orchestrator_key",
@@ -100,6 +102,30 @@ prebuilt_etc {
     src: "OrchestratorSampleCppServiceBundle.textproto",
     filename: "OrchestratorSampleCppServiceBundle.textproto",
     sub_dir: "config/orchestration",
+    // Disable direct installation of the manifest to one of the partitions.
+    // The manifest will be used only inside of service bundles registry apexes.
+    installable: false,
+}
+
+// File with the permissions configuration of service bundle is stored in the apex.
+prebuilt_etc {
+    name: "OrchestratorSampleCppServiceBundle-permissions-config",
+    // The source name of the manifest file.
+    src: "permissions/OrchestratorSampleCppServiceBundle.textproto",
+    filename: "OrchestratorSampleCppServiceBundle.textproto",
+    sub_dir: "config/permissions",
+    // Disable direct installation of the manifest to one of the partitions.
+    // The manifest will be used only inside of service bundles registry apexes.
+    installable: false,
+}
+
+// File with the permissions configuration of service bundle is stored in the apex.
+prebuilt_etc {
+    name: "OrchTestServiceBundle-permissions-config",
+    // The source name of the manifest file.
+    src: "permissions/OrchTestServiceBundle.textproto",
+    filename: "OrchTestServiceBundle.textproto",
+    sub_dir: "config/permissions",
     // Disable direct installation of the manifest to one of the partitions.
     // The manifest will be used only inside of service bundles registry apexes.
     installable: false,

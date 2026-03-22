@@ -14,7 +14,7 @@
 # proto-file: //system/software_defined_vehicle/vsidl/language/src/protos/sdv/vsidl/v1/syntax.proto
 # proto-message: VsidlEntry
 
-package: "com.android.sdv.orchestrator.test"
+package: "com.android.sdv.test.orchestrator"
 
 service_bundle {
     name: "OrchTestServiceBundle"

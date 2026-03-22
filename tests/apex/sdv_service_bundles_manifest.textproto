@@ -30,6 +30,7 @@ sdv_service_bundle_metadata {
   version_name: "0.1 Alpha"
   native_library_path: "lib64/liboem_orchestrator_service_bundle_cpp_sample.so"
   orchestration_config_path: "etc/config/orchestration/OrchestratorSampleCppServiceBundle.textproto"
+  authorization_policy_path: "etc/config/permissions/OrchestratorSampleCppServiceBundle.textproto"
 }
 
 # SDV orchestration sample with C++ service bundle.
@@ -39,4 +40,13 @@ sdv_service_bundle_metadata {
   version_name: "0.1 Alpha"
   native_library_path: "lib64/liboem_orchestrator_service_bundle_rust_sample.so"
   orchestration_config_path: "etc/config/orchestration/OrchSampleInitialPowerState.textproto"
+}
+
+# SDV orchestration sample with C++ service bundle.
+sdv_service_bundle_metadata {
+  name: "OrchTestServiceBundle"
+  version_number: 0
+  version_name: "0.1 Alpha"
+  native_library_path: "etc/sdv_service_bundles_manifest.textproto"
+  authorization_policy_path: "etc/config/permissions/OrchTestServiceBundle.textproto"
 }
