@@ -25,7 +25,7 @@ mod tests {
     use named_lock::NamedLock;
     use sdv_comms::id::ServiceFqin as Fqin;
     use sdv_comms::ContextRef;
-    use sdv_mw_rs_com_android_sdv_orchestrator_test_orch_test_service_bundle::OrchTestServiceBundle;
+    use sdv_mw_rs_com_android_sdv_test_orchestrator_orch_test_service_bundle::OrchTestServiceBundle;
     use sdv_mw_rs_comms::ClientOptions;
     use sdv_mw_rs_comms::RpcClient;
     use sdv_mw_rs_comms::UnitName;
@@ -84,7 +84,7 @@ mod tests {
         fn create_context(instance_name: &str) -> ContextRef {
             let fqin = Fqin::builder()
                 .sdv_vm_name("vm")
-                .sdv_package_name("com.android.sdv.orchestrator.test")
+                .sdv_package_name("com.android.sdv.test.orchestrator")
                 .service_bundle_name("OrchTestServiceBundle")
                 .service_instance_name(instance_name)
                 .build()

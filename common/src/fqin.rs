@@ -55,6 +55,7 @@ impl Fqin {
     /// Convert Orchestrator service instance representation to the representation used by LifecycleManager.
     pub fn to_lm_fqin(&self) -> ServiceFqin {
         ServiceFqin {
+            // TODO(b/492413448): Use LocalFqin to prevent hardcoding VM name.
             sdvVmName: "local-vm".to_owned(),
             sdvPackageName: self.package_name.clone(),
             serviceBundleName: self.service_bundle_name.clone(),

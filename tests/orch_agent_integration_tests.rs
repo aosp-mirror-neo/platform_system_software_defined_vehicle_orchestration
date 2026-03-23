@@ -25,7 +25,7 @@ mod tests {
     use protobuf::MessageField;
     use sdv_comms::id::ServiceFqin as Fqin;
     use sdv_comms::ContextRef;
-    use sdv_mw_rs_com_android_sdv_orchestrator_test_orch_test_service_bundle::OrchTestServiceBundle;
+    use sdv_mw_rs_com_android_sdv_test_orchestrator_orch_test_service_bundle::OrchTestServiceBundle;
     use google_sdv_orchestration::aidl::google::sdv::orchestration::ServiceBundleInstanceRecoveryState::ServiceBundleInstanceRecoveryState;
     use google_sdv_orchestration::aidl::google::sdv::orchestration::ServiceBundleInstanceLifecycleState::ServiceBundleInstanceLifecycleState;
     use google_sdv_orchestration::aidl::google::sdv::orchestration::IServiceBundleInstanceStateChangeListener::BnServiceBundleInstanceStateChangeListener;

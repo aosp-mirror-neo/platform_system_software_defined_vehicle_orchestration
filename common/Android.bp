@@ -53,5 +53,5 @@ rust_test {
         "automotive-sdv-tests",
         "general-tests",
     ],
-    test_config_template: ":sdv_authz_enforcement_flag_enabled_config_template",
+    test_config_template: ":sdv_authz_enforcement_flag_permissions_only_config_template",
 }
