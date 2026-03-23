@@ -48,6 +48,7 @@ impl ServiceBundle for OrchServiceBundle {
             "panic-start-restarts",
             "crash-on-start-no-restarts",
             "crash-on-start-restarts",
+            "crash-on-start-default-retries",
         ]
         .contains(&self.context.get_self_fqin().get_service_instance_name())
         {
