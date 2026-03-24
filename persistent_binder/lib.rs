@@ -16,7 +16,7 @@
 //! Utility for connecting to binder with reconnect on death notification.
 
 use binder::{DeathRecipient, IBinder};
-use log::{debug, warn};
+use log::{debug, info, warn};
 use mockall::automock;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -75,7 +75,7 @@ where
         if binder_guard.as_binder().link_to_death(&mut death_recipient).is_err() {
             warn!("Unable to link to death");
         } else {
-            warn!("Linked to death");
+            info!("Linked to death");
         }
         *self.death_recipient.lock().unwrap() = Some(death_recipient);
     }
