@@ -14,38 +14,6 @@
 # proto-file: //system/software_defined_vehicle/middleware/service_authz/proto/sdv/authz/policy/authz_policy.proto
 # proto-message: AuthzPolicy
 
-# ACL policies for Orchestrator Unit Types.
-
-acls {
-    name: "Public"
-    include: "*"
-}
-
-acls {
-    name: "Internal"
-    include: "*:com.android.sdv.orchestrator.OrchestratorServiceBundle"
-}
-
-unit_types {
-    name: "GlobalCustomStateChange"
-    acl_names: "Internal"
-}
-
-service_units {
-    name: "com-android-sdv-orchestrator-global-custom-state-change-unique"
-    acl_names: "Internal"
-}
-
-unit_types {
-    name: "CustomStateService"
-    acl_names: "Internal"
-}
-
-service_units {
-    name: "com-android-sdv-orchestrator-custom-state-service"
-    acl_names: "Public"
-}
-
 # Permissions
 
 publisher {
