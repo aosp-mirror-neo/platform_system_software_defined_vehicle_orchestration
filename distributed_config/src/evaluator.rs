@@ -766,17 +766,13 @@ mod tests {
     }
 
     #[test]
-    fn test_config_parser_partial_retry_config_provided_should_return_default_values() {
+    fn test_config_parser_partial_retry_config_provided_should_not_be_stored() {
         // GIVEN
         let evaluator = Evaluator::new(None, &["test/data/valid/sb1.textproto"]);
-        let left_instance = Fqin::new("sdv.test", "TestBundle1", "left");
-        let right_instance = Fqin::new("sdv.test", "TestBundle1", "right");
         // WHEN
         let retry_config = evaluator.get_retry_configuration();
-        // THEN default values were filled by proto
-        assert_that!(retry_config.len(), eq(2));
-        assert_that!(retry_config[&right_instance].max_retries, eq(0));
-        assert_that!(retry_config[&left_instance].max_retries, eq(0));
+        // THEN the configs are not stored
+        assert_that!(retry_config.len(), eq(0));
     }
 
     #[test]
