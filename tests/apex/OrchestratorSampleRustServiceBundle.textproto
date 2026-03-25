@@ -34,6 +34,7 @@ instance: "crash-on-create-no-restarts"
 instance: "crash-on-create-restarts"
 instance: "crash-on-start-no-restarts"
 instance: "crash-on-start-restarts"
+instance: "crash-on-start-default-retries"
 
 
 # Modes are used in rust integration tests. Do not change nor remove.
@@ -275,4 +276,16 @@ state {
 state {
   condition { custom_state { mode: "E2E-TESTS" state: "crash-on-start-restarts" } }
   instances_states { started: "crash-on-start-restarts" }
+}
+
+state {
+  condition {
+    custom_state {
+        mode: "E2E-TESTS"
+        state: "crash-on-start-default-retries"
+    }
+  }
+  instances_states {
+      started: "crash-on-start-default-retries"
+  }
 }
