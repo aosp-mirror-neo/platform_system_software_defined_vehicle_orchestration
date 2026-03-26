@@ -128,6 +128,18 @@ impl Publish for MockPublish {
         self.message_queue.lock().unwrap().publish_messages(messages);
         Ok(())
     }
+
+    fn publish_flat_batch(&self, _buffer: &[u8]) -> SdvResult<()> {
+        unimplemented!()
+    }
+
+    fn get_max_message_size(&self) -> SdvResult<usize> {
+        unimplemented!()
+    }
+
+    fn get_queue_capacity(&self) -> SdvResult<usize> {
+        unimplemented!()
+    }
 }
 
 /// Mocks the pubsub observer.
