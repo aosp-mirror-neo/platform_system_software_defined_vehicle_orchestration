@@ -17,6 +17,7 @@
 use log::debug;
 use sdv_comms::ContextRef;
 use sdv_lifecycle_client::service_bundle::ServiceBundle;
+use std::{thread, time::Duration};
 
 /// Sample implementation of the [sdv_lifecycle_client::service_bundle::ServiceBundle] interface.
 pub struct OrchServiceBundle {
@@ -52,6 +53,14 @@ impl ServiceBundle for OrchServiceBundle {
         ]
         .contains(&self.context.get_self_fqin().get_service_instance_name())
         {
+            panic!("Bundle crashed");
+        }
+        // We add a tiny sleep so that the HM monitoring sample has time to output
+        // that this instance is recovering in the e2e test `test_hm_reports_recovering_bundle_on_crash`.
+        if "crash-on-start-long-recovery"
+            == self.context.get_self_fqin().get_service_instance_name()
+        {
+            thread::sleep(Duration::from_secs(1));
             panic!("Bundle crashed");
         }
     }

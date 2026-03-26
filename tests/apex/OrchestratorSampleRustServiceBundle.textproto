@@ -35,6 +35,7 @@ instance: "crash-on-create-restarts"
 instance: "crash-on-start-no-restarts"
 instance: "crash-on-start-restarts"
 instance: "crash-on-start-default-retries"
+instance: "crash-on-start-long-recovery"
 
 
 # Modes are used in rust integration tests. Do not change nor remove.
@@ -51,6 +52,12 @@ retry_mapping {
   instance: "panic-stop-restarts"
   instance: "panic-create-on-start-restarts"
   retry_config { max_retries: 1 }
+}
+
+# Instance max_retries is big to have enough time to capture it as recovering.
+retry_mapping {
+  instance: "crash-on-start-long-recovery"
+  retry_config { max_retries: 10 }
 }
 
 retry_mapping {
@@ -289,3 +296,5 @@ state {
       started: "crash-on-start-default-retries"
   }
 }
+
+group_mapping { group: "monitoring_and_recovering_bundle_started" instance: "crash-on-start-long-recovery" }
