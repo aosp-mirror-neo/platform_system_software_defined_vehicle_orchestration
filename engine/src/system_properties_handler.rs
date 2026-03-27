@@ -16,7 +16,7 @@
 
 //! Handles the interaction with system properties.
 
-use log::error;
+use log::{error, info};
 use rustutils::android::system_properties;
 
 pub struct SystemProperties;
@@ -36,21 +36,27 @@ impl SystemProperties {
         property_name: &str,
         fallback_value: T,
     ) -> T {
-        let fallback_clone = fallback_value.clone();
-        read(property_name).ok().flatten().map_or_else(
-            || {
-                error!("Could not read property '{property_name}', using fallback value.");
-                fallback_value
-            },
-            |prop_str| {
-                prop_str.parse::<T>().unwrap_or_else(|_| {
+        match read(property_name) {
+            Ok(Some(prop_str)) => match prop_str.parse::<T>() {
+                Ok(value) => value,
+                Err(_) => {
                     error!(
                         "Could not parse property '{property_name}' with value '{prop_str}', using fallback value."
                     );
-                    fallback_clone
-                })
+                    fallback_value
+                }
             },
-        )
+            Ok(None) => {
+                info!("System property '{property_name}' value not set, using fallback value.");
+                fallback_value
+            }
+            Err(e) => {
+                error!(
+                    "Failed to read system property '{property_name}': {e}. Using fallback value."
+                );
+                fallback_value
+            }
+        }
     }
 }
 
