@@ -22,7 +22,7 @@ package {
 genrule {
     name: "libsdv_mw_rs_com_android_sdv_test_orchestrator_orch_test_service_bundle_rs",
     tools: ["extract_catalog_zip"],
-    srcs: [":vsidlc_orch_v1_catalog_files"],
+    srcs: [":vsidlc_orch_test_catalog_files"],
     out: [
         "service_bundle.rs",
     ],

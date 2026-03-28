@@ -16,4 +16,4 @@
 
 output_path: ".."
 dependency_catalog_paths: "../../../../vpm/stable/vsidl/"
-vsidlc_gen_args: "--genrule"
+vsidlc_gen_args: "--genrule --target-api pdk29"
